@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v0.51.89] — 2026-05-18 — Release BM (stage-382 — 6-PR full sweep batch — runtime adapter approval/clarify seam + SOUL.md memory panel + #1855 resolve_model_provider fast-path + PWA sidebar spinner fix + /model active-provider preference + contributor contract docs index)
+
 ### Changed
 
 - **PR #2496** by @Michaelyklam (refs #1925) — Route approval and clarify responses through the default-off `RuntimeAdapter.respond_approval(...)` / `respond_clarify(...)` seam when `HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal` is enabled. The default `legacy-direct` path still uses the existing callback helpers directly, legacy no-id responses keep their historical `ok: true` shape, and stale explicit approval ids are now bounded as not-active instead of falling back to the oldest queued command. No approval queue, clarify queue, callback registry, runner, sidecar, queue/goal migration, or cached-agent state is introduced.
