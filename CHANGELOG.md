@@ -6,6 +6,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 ### Fixed
 
 - Board selector menu labels no longer overlap board titles when board metadata uses a longer text label in the icon/color slot.
@@ -30,6 +31,11 @@
 
 - **PR #2515** (closes #2513) — Keep named custom-provider model pickers populated from each configured endpoint even when `custom_providers[].model` is present. The singular `model` field now acts as a sticky/fallback entry instead of preventing remote `/models` catalog entries or sibling custom providers from appearing.
 >>>>>>> pr-2515
+=======
+### Fixed
+
+- Show an elapsed timer on the running automatic-compression card so long WebUI context-compression pauses no longer look frozen while the browser waits for the `compressed` event.
+>>>>>>> pr-2512
 
 ## [v0.51.89] — 2026-05-18 — Release BM (stage-382 — 6-PR full sweep batch — runtime adapter approval/clarify seam + SOUL.md memory panel + #1855 resolve_model_provider fast-path + PWA sidebar spinner fix + /model active-provider preference + contributor contract docs index)
 
