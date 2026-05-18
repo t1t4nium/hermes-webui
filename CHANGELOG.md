@@ -16,6 +16,9 @@
 - **PR #2605** by @LumenYoung (refs #2581) — Make the metadata-only `/api/session?messages=0&resolve_model=0` path return the persisted sidecar `message_count` from `Session._metadata_message_count` when no session-index entry exists, so the active-session external-refresh signal still trips on legacy sessions whose sidecar contains externally-appended content. Composed cleanly with #2604 (the legacy-fallback applies only when the reconciled merged count is zero).
 - **PR #2573** by @espokaos-ops (closes #2510) — Persist session-level approvals when a "Allow for this session" click lands while a stream is active and `_pending` is empty. The approval flow now peeks `_gateway_queues[sid]` to recover the queued `_ApprovalEntry`'s `pattern_keys` so `approve_session()` records the approval; the next dangerous command in the same session no longer asks again. Reduced scope to peek-only per prior review note; the `agent_session_key` round-trip plumbing was dropped (it was dead on the WebUI streaming path).
 
+
+
+- Allow Settings → System to save public browser-only Official Hermes Dashboard links (for reverse-proxy URLs) without treating them as server-side probe targets.
 ### Added
 
 - **PR #2599** by @Michaelyklam (refs #1925) — Add the Slice 4b `RunnerRuntimeAdapter` facade — a protocol-translator client over a future runner/sidecar backend. The facade delegates `start_run`, `observe_run`, `get_run`, and control calls to an injected runner client, normalizes results into the existing `RunStartResult`/`RunEventStream`/`RunStatus`/`ControlResult` dataclasses, carries explicit `profile`/`workspace`/`model` payload fields, and returns bounded `unsupported` control results without owning `AIAgent`, stream lifecycle, cancel/approval/clarify queues, goal state, or cached-agent table. No route wiring, no default-on runner mode, no public response-shape change.
