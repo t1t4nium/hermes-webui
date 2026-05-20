@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+
+## [v0.51.95] — 2026-05-20 — Release BS (stage-388 — 5-PR batch — live tool callback event dedup + browser-only dashboard links + messaging transcript merge alignment + Geist Contrast skin + SSE runtime diagnostics)
+
 ### Fixed
 
 - **PR #2598** by @AJV20 — Surface live tool activity when Hermes Agent reports tools through its dedicated `tool_start_callback` / `tool_complete_callback` path, so browser chat shows the existing running tool cards instead of appearing idle until the final answer. The legacy `on_tool` callback path now early-returns for `tool.started` and `tool.completed` events when the structured callback path is already wired, preventing the same tool event from being emitted twice to the SSE stream.
@@ -11,7 +14,7 @@
 ### Added
 
 - **PR #2521** by @intellectronica — Add the Geist Contrast skin to the appearance picker. New light + dark variant pair with a high-contrast yellow-on-black accent and Geist editorial typography. Default unchanged — opt-in via Settings → Appearance → Skin → Geist Contrast. Slash command `/theme geist-contrast` now resolves correctly because the lookup matches against `skin.value` rather than `skin.name`. Documented in `THEMES.md` with a forward-compatible skin count (no hard-coded value).
-- **PR #2524** by @AJV20 — Add non-sensitive SSE stream runtime diagnostics to deep health checks, including active stream count, subscriber totals, and offline buffered-event counts for stuck or slow WebUI chat investigations. New `/api/webui/health/runtime` endpoint exposes the counters as read-only telemetry; existing surfaces unchanged.
+- **PR #2524** by @AJV20 — Add non-sensitive SSE stream runtime diagnostics to deep health checks (`/health?deep=1`), including active stream count, subscriber totals, and offline buffered-event counts for stuck or slow WebUI chat investigations. Read-only telemetry; existing surfaces unchanged.
 
 ## [v0.51.94] — 2026-05-19 — Release BR (stage-387 — 10-PR full sweep batch — Slice 4b runner adapter facade + folder zip download + partial recovery marker dedupe + browser api() client-side timeout + auto-compression card rotation finish + composer draft rollback fix + metadata count reconciliation + active-session refresh on external sidecar updates + indexed context metadata + gateway-queues approval peek)
 
