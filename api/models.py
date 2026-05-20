@@ -2495,9 +2495,10 @@ def _normalized_message_timestamp_for_key(value):
         timestamp = float(value)
     except (TypeError, ValueError):
         return str(value)
-    if timestamp.is_integer():
-        return str(int(timestamp))
-    return ("%.6f" % timestamp).rstrip("0").rstrip(".")
+    # Truncate to second-level granularity so that sub-second drift between
+    # the sidecar JSON write and the state.db created_at write does not cause
+    # the legacy dedup key to differ for the same logical message.
+    return str(int(timestamp))
 
 
 def _message_timestamp_as_float(msg):
