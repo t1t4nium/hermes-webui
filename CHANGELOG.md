@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.116] — 2026-05-22 — Release CN (stage-pr2676 — 1-PR — per-skill enable/disable toggle in Skills panel, CLI-parity with `hermes skills config`)
+
+### Added
+
+- **PR #2676** by @lucasrc — Each skill in the Skills panel now has a toggle pill (enabled/disabled) so users can turn individual skills on or off directly from the WebUI without editing `config.yaml`. Achieves parity with the existing `hermes skills config` CLI subcommand (interactive TUI that toggles `skills.disabled` in config). The disabled state is mirrored through to `skills.platform_disabled.webui` when that key is present. Disabled skills remain visible in the panel (muted via `opacity: .45`) instead of being filtered out, so users can re-enable them later. New endpoint: `POST /api/skills/toggle` validates the skill exists in the filesystem before mutating config, wraps the YAML read-modify-write under the existing `_cfg_lock` for thread safety, and calls `reload_config()` so the change takes effect immediately. Toggle pill uses theme variables (`--accent-bg-strong`, `--accent`, `--border`, `--muted`, `--accent-text`) so it adapts automatically to each skin: gold for default, red for ares, blue for poseidon, purple for sisyphus, grey for mono — verified empirically across light + dark variants. i18n keys (`skill_enabled`, `skill_disabled`, `skill_toggle_failed`) translated across all 10 locales. Default-state safety: fresh installs (no `skills.disabled` key in config) return `disabled: False` for every skill — no regression risk for new users.
+
 ## [v0.51.115] — 2026-05-22 — Release CM (stage-pr2731 — 1-PR — clarify prompt collapse/expand with chevron-icon polish)
 
 ### Added
