@@ -3,6 +3,18 @@
 
 ## [Unreleased]
 
+## [v0.51.122] — 2026-05-24 — Release CT (stage-batch4 — 4-PR low-risk batch — stale cache tail / inflight UI / segment flush / reasoning accumulator)
+
+### Fixed
+
+- **PR #2802** by @ai-ag2026 — Drop stale inactive cached user tails when `/api/session` reloads a conversation whose saved sidecar already ends on an assistant answer. Supersedes #2733 (held due to async-compression interaction): the new guard adds a `len(cached_messages) <= len(disk_messages)` filter so it never fires when the cache has genuine new concurrent edits beyond the disk state — only when the cache has an unsaved user row past the saved assistant tail. Adds `api/models._inactive_cache_tail_needs_disk_check()` + `_cache_has_stale_unsaved_user_tail()` helpers and 5 new tests in `tests/test_webui_state_db_reconciliation.py`. Previously-held test `test_session_compress_async_reports_stale_session_guard` now passes (verified). Closes umbrella #2361 partially.
+
+- **PR #2796** by @ai-ag2026 — Clear stale inflight UI state before starting a new send so blocked composer busy-state from failed/incomplete prior turns doesn't divert new turns into the invisible queue. Five-commit squashed fix: (1) drop stale optimistic sidebar rows once canonical session data arrives, (2) clear stale busy state before send via `_clearStaleBusyStateBeforeSend()`, (3) preserve server idle rows over stale optimistic local rows, (4) let `/api/chat/start` survive non-fatal pre-start UI errors via `_runOptionalPreStartUiStep()`, (5) keep those warnings console-only instead of throwing. Adds `_shouldKeepLocalOnlyOptimisticSessionRow()` in `static/sessions.js` and 8 new tests in `tests/test_inflight_send_start_race.py`. Closes #2795. Authorship preserved via `--author`.
+
+- **PR #2777** by @b3nw — Flush pending render before segment reset at tool/interim_assistant boundaries so live tokens that arrived in the 66ms rAF throttle window don't get lost from the DOM when `_resetAssistantSegment()` clears `assistantBody`. New `_flushPendingSegmentRender()` helper writes via `smd`, `renderMd`, or `esc` fallback (same paths as `_doRender`) only when `_renderPending` is true. Completed transcripts were never affected — `renderMessages` rebuilds from the full `assistantText` accumulator on `done`. Adds `tests/test_issue2713_streaming_segment_flush.py`. Closes #2713.
+
+- **PR #2778** by @b3nw — Reset reasoning accumulator per turn and prefer `reasoning_content` over `reasoning` on read. Two related bugs: (1) `reasoningText` was initialized once when the SSE stream opened and never reset between turns, so the `done` event would assign the union of every turn's reasoning to the last assistant message in multi-turn agent sessions; now reset at both turn boundaries (`tool` + `interim_assistant`). (2) `static/ui.js renderMessages` preferred `m.reasoning` (potentially corrupted by bug 1) over `m.reasoning_content` (the clean per-turn backend value); the fallback now reads `m.reasoning_content || m.reasoning`. Updates `tests/test_streaming_race_fix.py` to scope the reconnect-accumulator guard to the `_wireSSE` preamble only (turn-boundary resets inside event listeners are intentional). Adds `tests/test_issue2565_reasoning_accumulation.py`. Closes #2565.
+
 ## [v0.51.121] — 2026-05-24 — Release CS (stage-batch3 — 4-PR low-risk batch — state.db merge / display counts / compression marker / Windows launcher)
 
 ### Fixed
