@@ -2248,6 +2248,10 @@ def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
 
     Special case: task='__reset__' clears all auxiliary slots.
     """
+    if task != "__reset__" and task not in AUX_TASK_SLOTS:
+        raise ValueError(
+            f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}"
+        )
     config_path = _get_config_path()
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
