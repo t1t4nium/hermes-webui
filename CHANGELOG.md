@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The third-party notes drawer's “Recently used by AI” Joplin list now follows the WebUI-specific `webui_prefill_messages_script` hook when configured, including argv-style hooks such as `[python3, /path/to/recall.py]`, before falling back to the legacy generic `prefill_messages_script`.
+
 ## [v0.51.150] — 2026-05-28 — Release DV (stage-batch32 — single-PR reasoning-effort agent metadata)
 
 ### Fixed

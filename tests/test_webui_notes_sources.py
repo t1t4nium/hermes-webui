@@ -200,6 +200,39 @@ def test_joplin_recent_ai_notes_uses_configured_prefill_script(monkeypatch, tmp_
     assert all(note["used_reason"] == "automatic_recall" for note in notes)
 
 
+def test_joplin_recent_ai_notes_prefers_webui_prefill_script_hook(monkeypatch, tmp_path):
+    from api import routes
+
+    legacy_script = tmp_path / "legacy_context.py"
+    legacy_script.write_text('CURRENT_CONTEXT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n', encoding="utf-8")
+    webui_script = tmp_path / "webui_context.py"
+    webui_script.write_text(
+        'CURRENT_CONTEXT_ID = "5ba9ab822c344115939205ca4e8eaec0"\n'
+        'OPEN_ISSUES_ID = "623aeb6e55cb4aa39a0541f2ac09aa36"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(routes, "get_config", lambda: {
+        "prefill_messages_script": str(legacy_script),
+        "webui_prefill_messages_script": ["python3", str(webui_script)],
+    })
+
+    def fake_get(path, params=None):
+        note_id = path.rsplit("/", 1)[-1]
+        assert note_id != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        titles = {
+            "5ba9ab822c344115939205ca4e8eaec0": "Current Context",
+            "623aeb6e55cb4aa39a0541f2ac09aa36": "Open Issues",
+        }
+        return {"id": note_id, "title": titles[note_id], "updated_time": 123, "parent_id": "folder"}
+
+    monkeypatch.setattr(routes, "_joplin_api_get", fake_get)
+
+    notes = routes._joplin_recent_ai_notes(limit=2)
+
+    assert [note["title"] for note in notes] == ["Current Context", "Open Issues"]
+
+
+
 def test_external_notes_ui_uses_minimal_lucide_icons_for_ai_recent_notes():
     from pathlib import Path
 

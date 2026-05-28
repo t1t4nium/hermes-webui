@@ -12879,15 +12879,37 @@ _JOPLIN_AI_RECALL_NOTE_PRIORITY = [
 ]
 
 
-def _joplin_prefill_script_path() -> Path | None:
-    cfg = get_config()
-    path_value = cfg.get("prefill_messages_script") if isinstance(cfg, dict) else None
+def _script_path_from_config_value(path_value) -> Path | None:
+    """Return the likely recall script path from a string or argv-style hook."""
     if not path_value:
         return None
     try:
+        if isinstance(path_value, (list, tuple)):
+            candidates = [str(part).strip() for part in path_value if str(part).strip()]
+            # Hooks commonly use [python, /path/to/script.py]. Prefer the first
+            # Python-ish script argument over the interpreter so AI-recent notes
+            # reflect the configured recall source rather than "python3".
+            for candidate in candidates:
+                if candidate.endswith((".py", ".sh", ".bash")):
+                    return Path(candidate).expanduser()
+            if candidates:
+                return Path(candidates[-1]).expanduser()
+            return None
         return Path(str(path_value)).expanduser()
     except Exception:
         return None
+
+
+def _joplin_prefill_script_path() -> Path | None:
+    cfg = get_config()
+    if not isinstance(cfg, dict):
+        return None
+    # The browser notes drawer should mirror the WebUI-specific recall hook when
+    # configured. Fall back to the legacy generic session prefill script only for
+    # deployments that have not opted into WebUI dynamic recall.
+    return _script_path_from_config_value(
+        cfg.get("webui_prefill_messages_script") or cfg.get("prefill_messages_script")
+    )
 
 
 def _joplin_recall_note_refs(script_path: Path | None = None) -> list[dict]:
