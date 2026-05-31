@@ -492,7 +492,15 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
     S.pendingFiles.push(file);
     renderTray();
-    if(!ta.value.trim()){
+    // An explicit Send-button click while recording sets _micPendingSend — that
+    // is an unambiguous send intent, so honor it even when the composer already
+    // has text (mirrors the transcribe path). Otherwise (manual mic-stop): send
+    // immediately only if the composer is empty, else just attach + toast so the
+    // user can keep composing.
+    if(window._micPendingSend){
+      window._micPendingSend=false;
+      send();
+    }else if(!ta.value.trim()){
       send();
     }else{
       showToast(t('voice_raw_attached'));
