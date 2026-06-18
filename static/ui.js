@@ -2522,7 +2522,7 @@ function renderModelDropdown(){
     const _hit=_modelData.find(m=>m&&!m.endpointErrorOnly&&String(m.value||'')===_selVal);
     return _hit?_hit.groupKey:null;
   })();
-  const _makeModelRow=(m,sel,configuredIds)=>{
+  const _makeModelRow=(m,sel,shouldRenderHeading)=>{
     const row=document.createElement('div');
     row.className='model-opt'+(m.value===sel.value?' active':'');
     const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
@@ -2688,6 +2688,7 @@ function renderModelDropdown(){
         });
       }
       const useSubGroups=(
+        wrapper &&
         SUB_GROUP_PROVIDERS.has(meta.providerId) &&
         groupRows.length>=SUB_GROUP_MIN_MODELS
       );
@@ -2726,13 +2727,13 @@ function renderModelDropdown(){
             });
             wrapper.appendChild(subHeading);
             wrapper.appendChild(subWrapper);
-            for(const m of pfxRows) subWrapper.appendChild(_makeModelRow(m,sel,configuredIds));
+            for(const m of pfxRows) subWrapper.appendChild(_makeModelRow(m,sel,shouldRenderHeading));
           } else {
-            for(const m of pfxRows) wrapper.appendChild(_makeModelRow(m,sel,configuredIds));
+            for(const m of pfxRows) wrapper.appendChild(_makeModelRow(m,sel,shouldRenderHeading));
           }
         }
-      } else {
-        for(const m of groupRows) wrapper.appendChild(_makeModelRow(m,sel,configuredIds));
+      } else if(wrapper){
+        for(const m of groupRows) wrapper.appendChild(_makeModelRow(m,sel,shouldRenderHeading));
       }
       if(!term&&hiddenCount){
         const showAll=document.createElement('div');
