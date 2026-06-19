@@ -3,6 +3,9 @@
 Tests the actual deployed code on localhost:8787 via Chrome DevTools Protocol.
 Verifies flag lifecycle, event handler wiring, and render suppression.
 """
+import pytest
+pytest.importorskip("websockets")
+
 import json
 import asyncio
 import urllib.request
@@ -255,7 +258,7 @@ async def run_tests():
             })()
         """)
         if result.get("has_children") == True:
-            print(f"  PASS: content rendered after drag release")
+            print("  PASS: content rendered after drag release")
             passed += 1
         else:
             print(f"  FAIL: {result}")

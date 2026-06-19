@@ -9,6 +9,12 @@ Flow:
 2. SendInput: move real mouse cursor to scrollbar, click-and-drag
 3. CDP: verify scrollTop changed, flag lifecycle, content integrity
 """
+import sys
+import pytest
+pytest.importorskip("websockets")
+if sys.platform != "win32":
+    pytest.skip("Windows-only (SendInput)", allow_module_level=True)
+
 import ctypes
 import ctypes.wintypes
 import json
@@ -265,7 +271,7 @@ async def run():
             })()
         """)
 
-        print(f"\n=== RESULTS ===")
+        print("\n=== RESULTS ===")
         print(f"  Total scroll delta: {total_delta}px")
         print(f"  Monotonic steps: {increasing}/{steps-1}")
         print(f"  Reversals: {reversals}")
