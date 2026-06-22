@@ -1699,10 +1699,80 @@ def _session_list_cache_path_stamp(path: Path | None) -> tuple[int, int]:
         return (0, 0)
 
 
+def _session_list_cache_streaming_freeze_marker():
+    """Return a hold-down marker while any session is actively streaming, else None.
+
+    During an active chat turn the gateway/CLI writes message rows to state.db
+    continuously. Each write advances the WAL stat and the content fingerprint
+    (``MAX(rowid)`` of ``messages``) that ``_session_list_cache_source_stamp``
+    folds in, so the source stamp changes on essentially every ``/api/sessions``
+    poll — popping the cache and forcing a full ``all_sessions()`` rebuild
+    mid-stream. That rebuild then contends for the global ``LOCK`` the streaming
+    worker holds while writing, which is what drags token output down to
+    ~2 tok/s and produces the multi-second (and occasional ~15s) ``/api/sessions``
+    latencies in issue #4672.
+
+    The marker is keyed only on the *set* of active stream ids, not on any
+    per-write state, so:
+      * while the same turn(s) stream, the marker is constant → the cache holds
+        steady and rebuilds are bounded to the TTL cadence (one per
+        ``_SESSIONS_CACHE_TTL_SECONDS``) instead of one per poll;
+      * the instant a stream starts or stops, the active set changes → the
+        marker changes → the cache re-validates and the just-finished turn's
+        final title/message_count is picked up immediately.
+
+    Structural sidebar mutations (new/deleted/renamed/imported sessions,
+    attention, cron completion) do NOT rely on this stamp — they invalidate the
+    cache directly through the ``publish_session_list_changed`` listener — so the
+    only thing that can lag under the hold-down is a streaming session's own
+    title/message_count, which already tolerates a <=TTL refresh delay.
+    """
+    try:
+        active = _active_stream_ids()
+    except Exception:
+        return None
+    if not active:
+        return None
+    try:
+        return ("streaming", tuple(sorted(str(x) for x in active)))
+    except Exception:
+        return ("streaming",)
+
+
 def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int], object, int]:
     _cache_profile, _cache_all_profiles, cache_show_cli_sessions, *_rest = key
     if not cache_show_cli_sessions:
         return ((0, 0), (0, 0), (0, 0), (0, 0), (0, 0), None, 0)
+    try:
+        settings_file = SETTINGS_FILE
+    except Exception:
+        settings_file = None
+    try:
+        from api.config import _SETTINGS_WRITE_VERSION
+        swv = _SETTINGS_WRITE_VERSION
+    except Exception:
+        swv = 0
+    # Streaming hold-down (#4672): while a turn is in flight, collapse the
+    # volatile state.db-derived components (db/WAL stat, gateway metadata, index
+    # stat, content fingerprint) to a marker that only changes when a stream
+    # starts or stops. This stops per-token message writes from busting the
+    # cache and triggering LOCK-contending rebuilds on every poll. The TTL still
+    # forces a periodic rebuild so the streaming session's own count/title stay
+    # fresh within the TTL window, and settings_file + the settings write
+    # version stay live so user-initiated sidebar/setting toggles invalidate
+    # immediately. Skipping the fingerprint's SQLite connect here also makes the
+    # streaming-path stamp strictly cheaper than the idle path.
+    streaming_marker = _session_list_cache_streaming_freeze_marker()
+    if streaming_marker is not None:
+        return (
+            streaming_marker,
+            streaming_marker,
+            streaming_marker,
+            streaming_marker,
+            _session_list_cache_path_stamp(settings_file),
+            streaming_marker,
+            swv,
+        )
     try:
         state_db_path = Path(_active_state_db_path())
     except Exception:
@@ -1719,15 +1789,6 @@ def _session_list_cache_source_stamp(key: tuple) -> tuple[tuple[int, int], tuple
         session_index_path = SESSION_DIR / "_index.json"
     except Exception:
         session_index_path = None
-    try:
-        settings_file = SETTINGS_FILE
-    except Exception:
-        settings_file = None
-    try:
-        from api.config import _SETTINGS_WRITE_VERSION
-        swv = _SETTINGS_WRITE_VERSION
-    except Exception:
-        swv = 0
     return (
         _session_list_cache_path_stamp(state_db_path),
         _session_list_cache_path_stamp(state_db_wal_path),
@@ -1783,10 +1844,57 @@ def _session_list_cache_overlay_runtime_rows(rows: list[dict]) -> list[dict]:
             item["has_pending_user_message"] = bool(
                 getattr(live, "pending_user_message", None)
             )
+            for key in ("pending_started_at", "updated_at", "last_message_at"):
+                current = _session_list_row_numeric_value(item.get(key))
+                raw_live_value = getattr(live, key, None)
+                live_value = _session_list_row_numeric_value(raw_live_value)
+                if live_value > current:
+                    item[key] = raw_live_value
         stream_id = item.get("active_stream_id")
         item["is_streaming"] = bool(stream_id and stream_id in active_stream_ids)
         overlaid.append(item)
+    overlaid.sort(key=_session_list_runtime_sort_key, reverse=True)
     return overlaid
+
+
+def _session_list_row_numeric_value(value) -> float:
+    try:
+        numeric = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return numeric if numeric > 0 else 0.0
+
+
+def _session_list_row_timestamp(row: dict) -> float:
+    if not isinstance(row, dict):
+        return 0.0
+    # Match the frontend `_sessionSortTimestampMs` semantics exactly (#4688 review):
+    # the idle base is the FIRST truthy of last_message_at -> updated_at -> created_at
+    # (NOT a flat max over all of them — a renamed/metadata-touched idle chat bumps
+    # updated_at without new messages and must not outrank a newer chatted session),
+    # then pending_started_at is overlaid only as the runtime promotion.
+    base = 0.0
+    for key in ("last_message_at", "updated_at", "created_at"):
+        base = _session_list_row_numeric_value(row.get(key))
+        if base > 0:
+            break
+    pending = _session_list_row_numeric_value(row.get("pending_started_at"))
+    return max(base, pending)
+
+
+def _session_list_row_is_runtime_active(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if row.get("is_streaming"):
+        return True
+    return bool(row.get("active_stream_id") and row.get("has_pending_user_message"))
+
+
+def _session_list_runtime_sort_key(row: dict) -> tuple[int, float]:
+    return (
+        1 if _session_list_row_is_runtime_active(row) else 0,
+        _session_list_row_timestamp(row),
+    )
 
 
 def _session_list_cache_claim_rebuild(key: tuple) -> tuple[threading.Event, bool]:
