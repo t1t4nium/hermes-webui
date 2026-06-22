@@ -1500,7 +1500,7 @@ def authorize_escape_target(workspace: Path, session_id: str, rel: str) -> dict:
         "expires_at": expires_at,
     }
     with _ESCAPE_AUTH_LOCK:
-        _escape_prune_tokens(expires_at)
+        _escape_prune_tokens()
         _ESCAPE_AUTH_TOKENS[token] = record
     return {
         "token": token,

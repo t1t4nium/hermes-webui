@@ -116,6 +116,38 @@ def test_authorized_escape_request_expires_when_surface_target_changes(tmp_path)
         resolve_authorized_escape_request(workspace, "sess-1", grant["token"], "escape")
 
 
+def test_authorized_escape_request_keeps_other_live_grants(tmp_path):
+    workspace = tmp_path / "workspace"
+    outside_a = tmp_path / "outside-a"
+    outside_b = tmp_path / "outside-b"
+    workspace.mkdir()
+    outside_a.mkdir()
+    outside_b.mkdir()
+    (outside_a / "alpha.txt").write_text("alpha", encoding="utf-8")
+    (outside_b / "beta.txt").write_text("beta", encoding="utf-8")
+    (workspace / "escape-a").symlink_to(outside_a)
+    (workspace / "escape-b").symlink_to(outside_b)
+
+    grant_a = authorize_escape_target(workspace, "sess-1", "escape-a")
+    grant_b = authorize_escape_target(workspace, "sess-1", "escape-b")
+
+    resolved_a = resolve_authorized_escape_request(
+        workspace,
+        "sess-1",
+        grant_a["token"],
+        "escape-a/alpha.txt",
+    )
+    resolved_b = resolve_authorized_escape_request(
+        workspace,
+        "sess-1",
+        grant_b["token"],
+        "escape-b/beta.txt",
+    )
+
+    assert resolved_a["target"] == outside_a / "alpha.txt"
+    assert resolved_b["target"] == outside_b / "beta.txt"
+
+
 def test_authorized_listing_keeps_nested_child_escape_display_only(tmp_path):
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"

@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
+
+import pytest
 
 from api.routes import _project_os_workspace_read
 from tests._pytest_port import BASE
@@ -12,6 +17,7 @@ from tests._pytest_port import BASE
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 UI_JS = ROOT / "static" / "ui.js"
 WORKSPACE_JS = ROOT / "static" / "workspace.js"
+NODE = shutil.which("node")
 
 
 def _get_json(path: str) -> dict:
@@ -42,6 +48,31 @@ def _make_session(workspace: pathlib.Path) -> str:
     payload, status = _post_json("/api/session/new", {"workspace": str(workspace)})
     assert status == 200, payload
     return payload["session"]["session_id"]
+
+
+def _read_workspace_js() -> str:
+    return WORKSPACE_JS.read_text(encoding="utf-8")
+
+
+def _workspace_escape_helper_block() -> str:
+    src = _read_workspace_js()
+    start = src.find("function _escapeGrantStore(){")
+    assert start >= 0, "escape grant helper block start not found in static/workspace.js"
+    end = src.find("let _workspacePanelActiveTab = 'files';", start)
+    assert end >= 0, "escape grant helper block end not found in static/workspace.js"
+    return src[start:end]
+
+
+def _run_node(js: str) -> dict:
+    assert NODE is not None, "node not on PATH"
+    completed = subprocess.run(
+        [NODE, "-e", js],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
 
 
 class TestIssue4582EscapeNavigationLive:
@@ -96,6 +127,7 @@ class TestIssue4582EscapeNavigationLive:
         second_outside.mkdir()
         (second_outside / "secret.txt").write_text("secret", encoding="utf-8")
         (outside / "nested-escape").symlink_to(second_outside)
+        (outside / "nested-file-escape.txt").symlink_to(second_outside / "secret.txt")
         (workspace / "escape").symlink_to(outside)
 
         sid = _make_session(workspace)
@@ -119,13 +151,91 @@ class TestIssue4582EscapeNavigationLive:
         except urllib.error.HTTPError as exc:
             assert exc.code in (403, 404)
 
+        try:
+            _get_bytes(
+                f"/api/escape/file/raw?session_id={sid}&token={auth['token']}&path=escape/nested-file-escape.txt"
+            )
+            assert False, "nested file escape raw read should stay blocked"
+        except urllib.error.HTTPError as exc:
+            assert exc.code in (403, 404)
+
+
+pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+
 
 class TestIssue4582EscapeNavigationFrontend:
-    def test_workspace_route_helper_uses_escape_route_family(self):
-        src = WORKSPACE_JS.read_text(encoding="utf-8")
-        assert "/api/escape/list?" in src
-        assert "/api/escape/file/read?" in src
-        assert "/api/escape/file/raw?" in src
+    def test_authorization_flow_switches_routes_and_marks_subtree_read_only(self):
+        helper_block = _workspace_escape_helper_block()
+        js = (
+            "const helperBlock = "
+            + json.dumps(helper_block)
+            + ";\n"
+            + r"""
+const S = { session: { session_id: 'sess-1' }, currentDir: '.', _escapeGrants: Object.create(null) };
+const confirmCalls = [];
+const apiCalls = [];
+const toasts = [];
+const showConfirmDialog = async (opts) => { confirmCalls.push(opts); return true; };
+const api = async (path, opts) => {
+  apiCalls.push({ path, method: opts && opts.method, body: opts && opts.body });
+  return {
+    token: 'tok-123',
+    path: 'escape',
+    expires_at: 4102444800,
+    is_dir: true,
+    read_only: true,
+  };
+};
+const showToast = (...args) => { toasts.push(args); };
+const t = (key) => key;
+const runner = new Function(
+  'S', 'showConfirmDialog', 'api', 'showToast', 't', 'URLSearchParams',
+  helperBlock + '; return { authorizeWorkspaceEscapeNavigation, _workspaceRouteForPath, _workspacePathIsReadOnly, _workspaceEscapeGrantForPath };'
+);
+const apiFns = runner(S, showConfirmDialog, api, showToast, t, URLSearchParams);
+(async () => {
+  const beforeRead = apiFns._workspaceRouteForPath('escape/note.txt', 'read');
+  const beforeList = apiFns._workspaceRouteForPath('escape', 'list');
+  const grant = await apiFns.authorizeWorkspaceEscapeNavigation({ path: 'escape', name: 'escape' });
+  const afterRead = apiFns._workspaceRouteForPath('escape/note.txt', 'read');
+  const afterRaw = apiFns._workspaceRouteForPath('escape/note.txt', 'raw', { inline: true });
+  const grantLookup = apiFns._workspaceEscapeGrantForPath('escape/note.txt');
+  const readOnly = apiFns._workspacePathIsReadOnly('escape/note.txt');
+  console.log(JSON.stringify({
+    beforeRead,
+    beforeList,
+    afterRead,
+    afterRaw,
+    grant,
+    grantLookup,
+    readOnly,
+    confirmCalls,
+    apiCalls,
+    toasts,
+  }));
+})().catch((err) => {
+  console.error(err && err.stack ? err.stack : String(err));
+  process.exit(1);
+});
+"""
+        )
+        result = _run_node(js)
+        assert result["beforeRead"] == "/api/file?session_id=sess-1&path=escape%2Fnote.txt"
+        assert result["beforeList"] == "/api/list?session_id=sess-1&path=escape"
+        assert result["afterRead"] == "/api/escape/file/read?session_id=sess-1&path=escape%2Fnote.txt&token=tok-123"
+        assert result["afterRaw"] == "/api/escape/file/raw?session_id=sess-1&path=escape%2Fnote.txt&token=tok-123&inline=1"
+        assert result["grant"]["path"] == "escape"
+        assert result["grantLookup"]["token"] == "tok-123"
+        assert result["readOnly"] is True
+        assert result["confirmCalls"][0]["message"] == "external_link_open_confirm"
+        assert result["apiCalls"] == [
+            {
+                "path": "/api/escape/authorize",
+                "method": "POST",
+                "body": "{\"session_id\":\"sess-1\",\"path\":\"escape\"}",
+            }
+        ]
+        assert result["toasts"][0][0] == "external_link_read_only"
 
     def test_external_rows_authorize_then_open(self):
         src = UI_JS.read_text(encoding="utf-8")
@@ -135,7 +245,17 @@ class TestIssue4582EscapeNavigationFrontend:
 
     def test_read_only_affordances_stay_suppressed(self):
         ui_src = UI_JS.read_text(encoding="utf-8")
-        ws_src = WORKSPACE_JS.read_text(encoding="utf-8")
+        ws_src = _read_workspace_js()
         assert "if(!isReadOnlyEscape){" in ui_src
         assert "_workspacePathIsReadOnly(_previewCurrentPath)" in ws_src
         assert "_workspacePathIsReadOnly(S.currentDir || '.')" in ws_src
+
+    def test_open_in_browser_reuses_workspace_route_helper(self):
+        ws_src = _read_workspace_js()
+        match = re.search(
+            r"function openInBrowser\(\)\{\s*if\(!_previewCurrentPath\|\|!S\.session\) return;\s*const url=(.*?);\s*window\.open\(url,'_blank','noopener'\);\s*\}",
+            ws_src,
+            re.DOTALL,
+        )
+        assert match, "openInBrowser helper not found"
+        assert "_workspaceRouteForPath(_previewCurrentPath, 'raw', {inline:true})" in match.group(1)
