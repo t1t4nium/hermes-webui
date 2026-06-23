@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.602] — 2026-06-23 — Release VI (sidebar fetches only the active source bucket)
+
+### Changed
+
+- **The sidebar now fetches only the active WebUI/CLI tab's sessions instead of pulling the full mixed list and discarding the inactive half in the browser.** The active tab is sent as a `sidebar_source` query param, the `/api/sessions` payload is filtered server-side before serialization (keyed distinctly per bucket in the list cache), and explicit per-bucket counts are returned so both tab labels stay accurate. On a tab switch the sidebar now repaints synchronously under the new bucket so stale cross-bucket rows can't linger. Thanks @rodboev. (#4766)
+
 ## [v0.51.601] — 2026-06-23 — Release VH (sidebar lineage rows keep running/unread state when continuation is hidden)
 
 ### Fixed
