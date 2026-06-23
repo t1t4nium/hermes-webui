@@ -6337,6 +6337,8 @@ def _run_agent_streaming(
             # Throttle: emit metering events at most every 100 ms so the per-message
             # TPS label feels live during fast token streams without flooding SSE.
             _metering_last_emit = [time.monotonic() - 1]  # fire immediately on first token
+            _reasoning_last_put = [0.0]
+            _reasoning_buffer = ['']
             _metering_output_deltas = [0]
             _metering_reasoning_deltas = [0]
 
@@ -6380,6 +6382,11 @@ def _run_agent_streaming(
             def on_reasoning(text):
                 nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
                 if text is None:
+                    # Flush any remaining coalesced reasoning buffer so the last
+                    # partial window is not lost when the reasoning phase ends.
+                    if _reasoning_buffer[0]:
+                        put('reasoning', {'text': _reasoning_buffer[0]})
+                        _reasoning_buffer[0] = ''
                     return
                 _tool_boundary_advanced = False
                 reasoning_delta = str(text)
@@ -6398,7 +6405,19 @@ def _run_agent_streaming(
                 # concatenation is correct there.
                 if stream_id in STREAM_REASONING_TEXT:
                     STREAM_REASONING_TEXT[stream_id] += reasoning_delta
-                put('reasoning', {'text': reasoning_delta})
+                # Accumulate into a coalescing buffer so every delta reaches the
+                # browser — reasoning deltas are incremental, not idempotent.
+                _reasoning_buffer[0] += reasoning_delta
+                # Throttle reasoning SSE events to ~10 Hz to avoid overwhelming the
+                # frontend renderer. Each event triggers _parseStreamState() which
+                # scans the full accumulated text — 10k+ reasoning tokens/second
+                # builds up and locks the JS main thread. The user still sees live
+                # Thinking updates, just at a sustainable rate.
+                now = time.monotonic()
+                if now - _reasoning_last_put[0] >= 0.1:
+                    _reasoning_last_put[0] = now
+                    put('reasoning', {'text': _reasoning_buffer[0]})
+                    _reasoning_buffer[0] = ''
                 # Track reasoning deltas in the meter so live TPS reflects all AI output.
                 _metering_reasoning_deltas[0] += 1
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
