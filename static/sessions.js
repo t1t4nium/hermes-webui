@@ -1637,10 +1637,14 @@ function _requestedSessionSidebarSource() {
   return window._showCliSessions ? _sessionSourceFilter : 'webui';
 }
 
+function _sessionListExcludeHiddenEnabled() {
+  return _activeProject===null || _activeProject===NO_PROJECT_FILTER;
+}
+
 function _sessionListQueryString() {
   const qs = new URLSearchParams();
   qs.set('sidebar_source', _requestedSessionSidebarSource());
-  if(_activeProject===null || _activeProject===NO_PROJECT_FILTER) qs.set('exclude_hidden','1');
+  if(_sessionListExcludeHiddenEnabled()) qs.set('exclude_hidden','1');
   if(_showAllProfiles) qs.set('all_profiles','1');
   if(_showArchived) qs.set('include_archived','1');
   return `?${qs.toString()}`;
@@ -3882,6 +3886,7 @@ function _applySessionListPayload(sessData, projData){
       : (S.activeProfile || 'default'),
     allProfiles: !!_showAllProfiles,
     sidebarSource: _requestedSessionSidebarSource(),
+    excludeHidden: _sessionListExcludeHiddenEnabled(),
   };
   _syncSessionAttentionSoundState(_allSessions);
   _pruneLineageReportCacheToVisibleSessions(_allSessions);
@@ -3987,11 +3992,13 @@ async function _runRenderSessionListRefresh(opts, _gen){
       profile: S.activeProfile || 'default',
       allProfiles: !!_showAllProfiles,
       sidebarSource: _requestedSessionSidebarSource(),
+      excludeHidden: _sessionListExcludeHiddenEnabled(),
     };
     const _scopeMatches = _allSessionsScope
       && _allSessionsScope.profile === _curScope.profile
       && _allSessionsScope.allProfiles === _curScope.allProfiles
-      && _allSessionsScope.sidebarSource === _curScope.sidebarSource;
+      && _allSessionsScope.sidebarSource === _curScope.sidebarSource
+      && _allSessionsScope.excludeHidden === _curScope.excludeHidden;
     // #4671: the /api/sessions fetch failed — clear the skeleton flag so this error
     // render (matched cache, or empty rows for a mismatched scope) replaces the
     // up-front profile-switch skeleton instead of stranding it.

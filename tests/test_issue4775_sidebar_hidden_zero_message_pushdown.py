@@ -245,6 +245,7 @@ def test_omit_exclude_hidden_still_returns_default_hidden_rows(monkeypatch):
 def test_default_and_unassigned_queries_send_exclude_hidden(monkeypatch):
     src = SESSIONS_JS.read_text(encoding="utf-8")
     requested_source_fn = _extract_function(src, "_requestedSessionSidebarSource")
+    exclude_hidden_fn = _extract_function(src, "_sessionListExcludeHiddenEnabled")
     project_filter_fn = _extract_function(src, "_setActiveProjectFilter")
     query_fn = _extract_function(src, "_sessionListQueryString")
     script = f"""
@@ -257,6 +258,7 @@ global.NO_PROJECT_FILTER = '__none__';
 global.renderSessionListFromCache = () => {{}};
 global.renderSessionList = () => Promise.resolve();
 {requested_source_fn}
+{exclude_hidden_fn}
 {project_filter_fn}
 {query_fn}
 const default_query = _sessionListQueryString();
