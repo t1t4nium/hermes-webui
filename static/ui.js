@@ -4472,7 +4472,7 @@ function _setMessageScrollToBottom(){
   if(!el) return;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   el.scrollTop=el.scrollHeight;
-  _lastScrollTop=el.scrollTop;
+  _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   _nearBottomCount=2;
   _scrollPinned=true;
   requestAnimationFrame(()=>{
@@ -4487,7 +4487,7 @@ function _setMessageScrollToBottom(){
       return;
     }
     el.scrollTop=el.scrollHeight;
-    _lastScrollTop=el.scrollTop;
+    _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
     _nearBottomCount=2;
     _scrollPinned=true;
     _deferClearProgrammaticScroll();
@@ -4612,7 +4612,7 @@ function _settleFinalScroll(token){
   }
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   el.scrollTop=el.scrollHeight;
-  _lastScrollTop=el.scrollTop;
+  _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   _nearBottomCount=2;
   _scrollPinned=true;
   _deferClearProgrammaticScroll();
@@ -11002,7 +11002,7 @@ function _restoreMessageScrollSnapshot(snapshot){
     el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
   }
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
-  _lastScrollTop=el.scrollTop;
+  _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   if(snapshot.userUnpinned===true){
     _messageUserUnpinned=true;
     _scrollPinned=false;
@@ -11068,7 +11068,7 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
     el.scrollTop=Math.max(0,Math.min(target,maxTop));
   }
-  _lastScrollTop=el.scrollTop;
+  _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   if(snapshot.pinned===true){
     _messageUserUnpinned=false;
     _scrollPinned=true;

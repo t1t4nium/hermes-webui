@@ -18,6 +18,20 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 
 
+def test_client_height_seeded_with_scrolltop_on_programmatic_writes():
+    """Every programmatic seed of `_lastScrollTop` must also seed
+    `_lastMessageClientHeight`, else the FIRST native toolbar-collapse scroll event
+    sees a null/stale prior height, `grew` is false, and the false-unpin still
+    fires (Codex gate finding). The two must always be written together."""
+    # No bare `_lastScrollTop=el.scrollTop;` without the height co-seed remains.
+    assert "_lastScrollTop=el.scrollTop;\n" not in UI_JS, (
+        "A programmatic _lastScrollTop=el.scrollTop write is missing the paired "
+        "_lastMessageClientHeight=el.clientHeight seed (#4702)."
+    )
+    # The paired form is present at the programmatic-write sites.
+    assert UI_JS.count("_lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;") >= 4
+
+
 def test_client_height_growth_guard_declared():
     """The scroller-height tracker must be declared so a toolbar-settle reflow can
     be distinguished from a real user scroll."""
