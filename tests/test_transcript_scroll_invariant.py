@@ -106,10 +106,7 @@ def test_messages_inner_never_becomes_a_y_scroll_container():
 def test_messages_remains_the_transcript_scroll_container():
     """The transcript's real scroller is .messages: it must keep overflow-y:auto
     and min-height:0 (so it can shrink in the flex column and scroll)."""
-    rules = [b for _, b in _all_rule_bodies(".messages")
-             if re.search(r"(^|[,\s]):?\.messages\{", b[: b.index("{") + 1].replace(" ", ""))
-             or b[: b.index("{")].strip().endswith(".messages")]
-    # Fall back: find the base `.messages{...}` rule directly.
+    # Find the base `.messages{...}` rule directly (not .messages-inner / variants).
     base = re.search(r"(?<![\w.-])\.messages\{[^}]*\}", CSS)
     assert base, ".messages base rule not found"
     d = _decls(base.group(0))
