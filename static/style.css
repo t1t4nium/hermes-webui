@@ -2493,7 +2493,19 @@
     .topbar-chips .chip,.topbar-chips .ws-chip,.topbar-chips button{font-size:11px!important;padding:4px 8px!important;white-space:nowrap;}
     .settings-main{padding:18px 16px;}
     .hermes-action-grid{grid-template-columns:1fr;}
-    .messages-inner{padding:12px 10px 20px;max-width:100%;overflow-x:hidden;word-break:break-word;min-width:0;}
+    /* #4856: use overflow-x:clip, NOT hidden. `overflow-x:hidden` forces
+       overflow-y from visible to auto (CSS spec: the two axes can't be
+       visible+clipped), which turns .messages-inner into a scroll container.
+       A scroll container's `min-height:auto` resolves to 0, so this flex item
+       (flex-shrink:1 inside the .messages column flexbox) collapses to the
+       scroller's height instead of growing to its content — the transcript
+       then overflows the INNER (clipped) rather than the .messages scroller,
+       leaving nothing to scroll and pinning scrollTop at 0. On mobile that
+       made every conversation land at the top and refuse to scroll down.
+       `overflow-x:clip` suppresses horizontal overflow (the original #4583
+       intent) WITHOUT coercing overflow-y or creating a scroll container, so
+       min-height:auto stays min-content and the inner grows normally. */
+    .messages-inner{padding:12px 10px 20px;max-width:100%;overflow-x:clip;word-break:break-word;min-width:0;}
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
     .composer-wrap{padding:8px 10px 12px!important;}
