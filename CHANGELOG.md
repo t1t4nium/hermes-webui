@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.683] — 2026-06-26 — Release YM (WebUI finds the agent for pip-style installs — no more cron.jobs import error)
+
+### Fixed
+
+- **WebUI now locates the agent on pip-style installs, fixing a `ModuleNotFoundError: No module named 'cron.jobs'`.** Agent-directory discovery only accepted a source checkout containing `run_agent.py`, so a pip-style layout that ships the cron jobs module without that entrypoint left the agent dir unset and the cron import unrepaired. Discovery now also recognizes a pip-style root (the cron jobs module plus a real `hermes_cli` package signal), in an ordered search that always prefers a genuine `run_agent.py` checkout before any pip-style candidate — so a real checkout can never be preempted by a lookalike — and the pip-style marker is strict enough (requires `hermes_cli`, not a bare generic directory) that a non-agent folder can't false-match. Thanks @rodboev. (#4998, fixes #4700)
+
 ## [v0.51.682] — 2026-06-26 — Release YL (faster long-session open — indexed compression-continuation lookup)
 
 ### Fixed
