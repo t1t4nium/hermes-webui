@@ -611,6 +611,20 @@ def test_onboarding_non_custom_provider_mounts_searchable_model_picker():
     assert "customInputId:'onboardingModelInput'" in js
 
 
+def test_onboarding_plain_select_fallback_rehydrates_saved_model():
+    """When the searchable picker helper is unavailable, the plain <select>
+    fallback must still rehydrate ONBOARDING.form.model so a saved/default
+    model that isn't the first option isn't silently replaced by option[0]."""
+    js = (REPO / "static" / "onboarding.js").read_text(encoding="utf-8")
+    # The mount block must have an else branch that restores the plain select value.
+    mount_idx = js.find("if(modelPickerRoot && typeof _mountSearchableModelSelect")
+    assert mount_idx != -1
+    after_mount = js[mount_idx:mount_idx + 900]
+    assert "}else{" in after_mount or "} else {" in after_mount
+    assert "const modelSel=$('onboardingModelSelect')" in after_mount
+    assert "modelSel.value=ONBOARDING.form.model" in after_mount
+
+
 def test_onboarding_custom_provider_text_input_branch_stays_intact():
     js = (REPO / "static" / "onboarding.js").read_text(encoding="utf-8")
     assert "ONBOARDING.form.provider==='custom'" in js

@@ -369,6 +369,12 @@ function _renderOnboardingBody(){
         selectedValue:ONBOARDING.form.model,
         onModelChange:(value)=>{ ONBOARDING.form.model=(value||'').trim(); },
       });
+    }else{
+      // Fallback path (searchable picker unavailable): rehydrate the plain
+      // <select> so a saved/default model that isn't the first option isn't
+      // silently replaced by option[0] on render.
+      const modelSel=$('onboardingModelSelect');
+      if(modelSel && ONBOARDING.form.model) modelSel.value=ONBOARDING.form.model;
     }
     return;
   }
