@@ -3982,6 +3982,7 @@ function _bucketDailyTokensForChart(rows) {
     const slice = rows.slice(i, i + bucketSize);
     const input_tokens = slice.reduce((s, r) => s + Number(r.input_tokens || 0), 0);
     const output_tokens = slice.reduce((s, r) => s + Number(r.output_tokens || 0), 0);
+    const cache_read_tokens = slice.reduce((s, r) => s + Number(r.cache_read_tokens || 0), 0);
     const sessions = slice.reduce((s, r) => s + Number(r.sessions || 0), 0);
     const cost = slice.reduce((s, r) => s + Number(r.cost || 0), 0);
 
@@ -3999,6 +4000,7 @@ function _bucketDailyTokensForChart(rows) {
       date: firstDate,
       input_tokens,
       output_tokens,
+      cache_read_tokens,
       sessions,
       cost,
     });
@@ -4059,7 +4061,13 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
         const outputPct = Math.max((output / maxDailyTokens) * 100, output ? 2 : 0).toFixed(1);
         const showLabel = idx === 0 || idx === chartRows.length - 1 || idx % labelEvery === 0;
         const titleDate = r.title || r.date;
-        const title = `${titleDate} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
+        const cacheRead = Number(r.cache_read_tokens || 0);
+        // Bounded daily cache hit rate: reads / (input + reads), 0-100%.
+        const cacheDenom = input + cacheRead;
+        const cacheStr = (cacheRead > 0 && cacheDenom > 0)
+          ? ` · ${Math.min(100, Math.round((cacheRead / cacheDenom) * 100))}% ${t('insights_model_cache')}`
+          : '';
+        const title = `${titleDate} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')}${cacheStr} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
         const labelText = r.label !== undefined ? r.label : String(r.date).slice(5);
         return `<div class="insights-daily-bar" title="${esc(title)}"><div class="insights-daily-stack" aria-label="${esc(title)}"><div class="insights-daily-bar-output" style="height:${outputPct}%"></div><div class="insights-daily-bar-input" style="height:${inputPct}%"></div></div><span>${showLabel ? esc(labelText) : ''}</span></div>`;
       }).join('') +
@@ -4071,11 +4079,15 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   // Models table
   let modelsHtml = '';
   if (d.models && d.models.length) {
-    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table insights-model-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_sessions'))}</span><span>${esc(t('insights_model_tokens'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
+    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table insights-model-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_sessions'))}</span><span>${esc(t('insights_model_tokens'))}</span><span title="${esc(t('insights_cache_hit'))}">${esc(t('insights_model_cache'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
       d.models.map(m => {
         const share = Number(m.cost_share || m.token_share || m.session_share || 0);
         const title = `${m.model} · ${fmtTokens(m.input_tokens)} ${t('insights_input_tokens')} · ${fmtTokens(m.output_tokens)} ${t('insights_output_tokens')}`;
-        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span><span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
+        const cachePct = (m.cache_hit_percent === null || m.cache_hit_percent === undefined) ? null : Number(m.cache_hit_percent);
+        const cacheCell = cachePct === null
+          ? '<span class="insights-model-cache insights-model-cache-empty">—</span>'
+          : `<span class="insights-model-cache" title="${esc(t('insights_cache_hit'))}: ${fmtTokens(m.cache_read_tokens || 0)}">${cachePct}%</span>`;
+        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span>${cacheCell}<span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
       }).join('') +
       `</div></div>`;
   } else {
