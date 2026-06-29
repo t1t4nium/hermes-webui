@@ -453,6 +453,9 @@ const _recycleResetAttrs=[
   'data-transparent-turn-toggle-bound',
   'data-anchor-scene-live-owner',
   'data-anchor-stream-id',
+  'data-latest-assistant-response',
+  'role',
+  'aria-label',
   // Defensive reset for legacy/restored shells that may still carry the fallback live-turn marker.
   'data-live-assistant-turn',
 ];
@@ -8634,6 +8637,24 @@ function _createAssistantTurn(tsTitle='', tpsText=''){
   row.innerHTML=`${_assistantRoleHtml(tsTitle, tpsText)}<div class="assistant-turn-blocks"></div>`;
   return row;
 }
+function _setLatestAssistantTurnLandmark(turn, isLatest){
+  if(!turn) return;
+  const label='Latest Hermes response';
+  if(isLatest){
+    if(typeof document!=='undefined'){
+      document.querySelectorAll('.assistant-turn[data-latest-assistant-response="true"]').forEach(el=>{
+        if(el!==turn) _setLatestAssistantTurnLandmark(el, false);
+      });
+    }
+    turn.setAttribute('role','region');
+    turn.setAttribute('aria-label',label);
+    turn.dataset.latestAssistantResponse='true';
+    return;
+  }
+  if(turn.getAttribute('role')==='region') turn.removeAttribute('role');
+  if(turn.getAttribute('aria-label')===label) turn.removeAttribute('aria-label');
+  delete turn.dataset.latestAssistantResponse;
+}
 function _assistantTurnBlocks(turn){
   return turn?turn.querySelector('.assistant-turn-blocks'):null;
 }
@@ -12342,6 +12363,13 @@ function renderMessages(options){
     }catch(e){}
   }
   const transparentToolResultsByTid=_transparentModeActive?_collectToolResultSnippetsByTid(S.messages):{};
+  const latestRenderedAssistantRawIdx=(()=>{
+    for(let i=renderVisWithIdx.length-1;i>=0;i--){
+      const entry=renderVisWithIdx[i];
+      if(entry&&entry.m&&entry.m.role==='assistant'&&!entry.m._live) return entry.rawIdx;
+    }
+    return -1;
+  })();
   // Windowed render loop replaces the legacy full loop:
   // for(let vi=0;vi<visWithIdx.length;vi++)
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
@@ -12529,6 +12557,7 @@ function renderMessages(options){
       currentAssistantTurn.dataset.recycleKey=rawIdx;
       inner.appendChild(currentAssistantTurn);
     }
+    _setLatestAssistantTurnLandmark(currentAssistantTurn, !m._live&&rawIdx===latestRenderedAssistantRawIdx);
     const seg=document.createElement('div');
     if(Array.isArray(orderedTransparentParts)&&orderedTransparentParts.length){
       const blocks=_assistantTurnBlocks(currentAssistantTurn);
