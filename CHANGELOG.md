@@ -35,6 +35,9 @@
 
 ### Fixed
 
+- **`/pet` now works in the WebUI, handing off to the Desktop Companion extension.** Typing `/pet` (and its subcommands) is intercepted client-side and routed to the petdex companion extension with graceful per-stage guidance when the extension isn't installed; the command output is XSS-safe. Thanks @rodboev. (#5168, #4843)
+- **Settings search results are now ranked by match source.** Results are ordered title/label > value/option > description, with a stable prefix + earlier-index tie-break, and the result cap is applied after ranking so the best matches are never dropped; supplemental and provider/plugin-card terms remain searchable (reorder-only). XSS-safe. Thanks @rodboev. (#5211, #5149)
+
 - **Opt-in busy composer placeholder hint.** A new default-off setting swaps the composer placeholder to a busy-mode-specific hint (queue / steer / interrupt) when the agent is running, deferring to the compression placeholder and any user draft, and restoring on idle. Text-only (no layout change), XSS-safe, localized across all 14 locales. Thanks @rodboev. (#5161, #5144)
 
 - **A server-initiated turn that finished during an SSE gap now renders correctly on a visible-tab wake.** When a tab regained focus after the SSE stream had a gap, a self-heal reload could clobber a concurrent same-session `server_turn_started`, losing live-render ownership. The active stream id is now re-read after the awaited message load and scoped to the same session, so a concurrent same-session stream is honored by the attach/idle decision. The original SSE-gap self-heal (metadata-only server-ahead, in-place replace, no jump) is intact. Thanks @allenliang2022. (#5248)
