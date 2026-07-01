@@ -6694,13 +6694,19 @@ def _run_agent_streaming(
         s = get_session(session_id)
         update_active_run(stream_id, phase="running", session_id=session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
-        s.model = model
+        _last_persisted_model = getattr(s, "model", None)
         provider_context = (
             str(model_provider).strip().lower()
             if model_provider is not None
             else getattr(s, "model_provider", None)
         )
-        s.model_provider = provider_context or None
+        # #4251: the route layer already persisted this turn's model under the
+        # session lock before dispatch, so a mismatch here means a newer picker
+        # write won the race and must not be clobbered by the worker thread.
+        if _last_persisted_model in (None, "", model):
+            s.model = model
+            s.model_provider = provider_context or None
+            _last_persisted_model = model
 
         _agent_lock = _get_session_agent_lock(session_id)
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
@@ -6742,9 +6748,13 @@ def _run_agent_streaming(
             profile_home=_profile_home,
             has_profile=bool(getattr(s, "profile", None)),
         )
-        s.model_provider = provider_context
-        if _repaired and model != (s.model or ""):
-            s.model = model
+        # #4251: only apply the profile-repair persistence if this turn still
+        # owns the session model value it last wrote.
+        if getattr(s, "model", None) == _last_persisted_model:
+            s.model_provider = provider_context
+            if _repaired and model != (s.model or ""):
+                s.model = model
+                _last_persisted_model = model
 
         # Capture the resolved profile name now, while profile context is
         # reliable. Used in the compression migration block to stamp s.profile
