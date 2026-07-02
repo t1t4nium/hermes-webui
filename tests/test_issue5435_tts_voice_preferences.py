@@ -1,6 +1,7 @@
 """Regression checks for #5435 TTS and voice preference persistence."""
 
 import json
+import importlib
 import pathlib
 import urllib.error
 import urllib.request
@@ -24,6 +25,7 @@ SPEECH_DEFAULTS = {
     "voice_silence_ms": 1800,
     "raw_audio_mode": False,
 }
+PERSISTED_SPEECH_KEYS_FIELD = "persisted_speech_keys"
 
 
 def get(path):
@@ -70,10 +72,27 @@ def _reset_speech_settings(extra=None):
     post("/api/settings", payload)
 
 
+def _settings_file_snapshot():
+    cfg = importlib.import_module("api.config")
+    path = cfg.SETTINGS_FILE
+    original = path.read_text(encoding="utf-8") if path.exists() else None
+    return path, original
+
+
+def _restore_settings_file(path, original):
+    if original is None:
+        if path.exists():
+            path.unlink()
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(original, encoding="utf-8")
+
+
 def test_settings_api_exposes_tts_voice_and_raw_audio_defaults():
     data, status = get("/api/settings")
 
     assert status == 200
+    assert data[PERSISTED_SPEECH_KEYS_FIELD] == []
     for key, value in SPEECH_DEFAULTS.items():
         assert data[key] == value
 
@@ -107,11 +126,65 @@ def test_settings_api_round_trips_speech_preferences():
         assert saved["voice_continuous"] is True
         assert saved["voice_silence_ms"] == 2400
         assert saved["raw_audio_mode"] is True
+        assert saved[PERSISTED_SPEECH_KEYS_FIELD] == sorted(payload)
         for key in payload:
             expected = saved[key]
             assert reloaded[key] == expected
+        assert reloaded[PERSISTED_SPEECH_KEYS_FIELD] == sorted(payload)
     finally:
         _reset_speech_settings()
+
+
+def test_settings_api_reports_only_raw_persisted_speech_keys():
+    path, original = _settings_file_snapshot()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "show_tps": True,
+                    "tts_pitch": 0.0,
+                    "voice_mode_button": False,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        data, status = get("/api/settings")
+
+        assert status == 200
+        assert data[PERSISTED_SPEECH_KEYS_FIELD] == [
+            "tts_pitch",
+            "voice_mode_button",
+        ]
+        assert data["tts_pitch"] == 0.0
+        assert data["voice_mode_button"] is False
+        assert data["tts_enabled"] is False
+    finally:
+        _restore_settings_file(path, original)
+
+
+def test_unrelated_settings_save_does_not_materialize_absent_speech_defaults():
+    path, original = _settings_file_snapshot()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"show_tps": False}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        saved, status = post("/api/settings", {"show_tps": True})
+
+        assert status == 200
+        assert saved["show_tps"] is True
+        assert saved[PERSISTED_SPEECH_KEYS_FIELD] == []
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["show_tps"] is True
+        for key in SPEECH_DEFAULTS:
+            assert key not in raw
+    finally:
+        _restore_settings_file(path, original)
 
 
 def test_invalid_speech_settings_preserve_previous_values_and_unrelated_settings():
@@ -169,7 +242,7 @@ def test_boot_mirrors_server_settings_before_tts_apply_and_preserves_failure_fal
     assert success_call_idx < apply_idx
     assert catch_idx < failure_apply_idx
     assert "const defaults={" in BOOT_JS
-    assert "const hasServerValue=(settingKey)=>Object.prototype.hasOwnProperty.call(s,settingKey);" in BOOT_JS
+    assert "Array.isArray(s.persisted_speech_keys) ? s.persisted_speech_keys : []" in BOOT_JS
     assert "if(!hasServerValue(settingKey)&&cached!==null)" in BOOT_JS
     for storage_key in [
         "hermes-tts-enabled",
@@ -187,9 +260,9 @@ def test_boot_mirrors_server_settings_before_tts_apply_and_preserves_failure_fal
     assert "window._applyRawAudioModePreference" in BOOT_JS
 
 
-def test_server_saved_defaults_win_over_stale_local_cache_in_boot_and_panel_logic():
+def test_persisted_speech_key_metadata_controls_boot_and_panel_precedence():
     mirror_fn = _extract_balanced_block(BOOT_JS, "function _mirrorSpeechSettingsFromServer")
-    speech_setting_start = PANELS_JS.index("const _speechSetting=function(")
+    speech_setting_start = PANELS_JS.index("const persistedSpeechKeys = new Set(")
     speech_setting_end = PANELS_JS.index("const _speechBool=function", speech_setting_start)
     speech_setting_block = PANELS_JS[speech_setting_start:speech_setting_end].strip()
     script = f"""
@@ -208,13 +281,24 @@ const localStorage = {{
 }};
 const window = {{}};
 {mirror_fn}
-_mirrorSpeechSettingsFromServer({{tts_enabled: false, tts_pitch: 1}});
+_mirrorSpeechSettingsFromServer({{tts_enabled: false, tts_pitch: 1, persisted_speech_keys: []}});
+assert.strictEqual(localStorage.getItem('hermes-tts-enabled'), 'true');
+assert.strictEqual(localStorage.getItem('hermes-tts-pitch'), '0.8');
+{{
+  let settings = {{tts_enabled: false, tts_pitch: 1, persisted_speech_keys: []}};
+  {speech_setting_block}
+  assert.strictEqual(_speechSetting('tts_enabled', 'hermes-tts-enabled', false, 'bool'), 'true');
+  assert.strictEqual(_speechSetting('tts_pitch', 'hermes-tts-pitch', 1), '0.8');
+}}
+_mirrorSpeechSettingsFromServer({{tts_enabled: false, tts_pitch: 1, persisted_speech_keys: ['tts_enabled', 'tts_pitch']}});
 assert.strictEqual(localStorage.getItem('hermes-tts-enabled'), 'false');
 assert.strictEqual(localStorage.getItem('hermes-tts-pitch'), '1');
-let settings = {{tts_enabled: false, tts_pitch: 1}};
-{speech_setting_block}
-assert.strictEqual(_speechSetting('tts_enabled', 'hermes-tts-enabled', false, 'bool'), false);
-assert.strictEqual(_speechSetting('tts_pitch', 'hermes-tts-pitch', 1), 1);
+{{
+  let settings = {{tts_enabled: false, tts_pitch: 1, persisted_speech_keys: ['tts_enabled', 'tts_pitch']}};
+  {speech_setting_block}
+  assert.strictEqual(_speechSetting('tts_enabled', 'hermes-tts-enabled', false, 'bool'), false);
+  assert.strictEqual(_speechSetting('tts_pitch', 'hermes-tts-pitch', 1), 1);
+}}
 """
 
     import subprocess
@@ -246,11 +330,14 @@ def test_settings_panel_persists_speech_fields_and_keeps_immediate_cache_writes(
     ]:
         assert storage_key in panel_block or storage_key in payload_block
     assert "_speechSetting('tts_engine','hermes-tts-engine','browser')" in panel_block
+    assert "function _speechPreferencesPayloadFromUi()" in PANELS_JS
     assert "savedRate||'1'" not in panel_block
     assert "savedPitch||'1'" not in panel_block
     assert "ttsRateSlider.value=(savedRate===null||savedRate===undefined)?'1':String(savedRate)" in panel_block
     assert "ttsPitchSlider.value=(savedPitch===null||savedPitch===undefined)?'1':String(savedPitch)" in panel_block
-    assert "if(settings&&Object.prototype.hasOwnProperty.call(settings,key)) return settings[key];" in PANELS_JS
+    assert "if(settings&&persistedSpeechKeys.has(key)) return settings[key];" in PANELS_JS
+    assert "Object.assign(payload,_speechPreferencesPayloadFromUi());" in payload_block
+    assert "Object.assign(body,_speechPreferencesPayloadFromUi());" in PANELS_JS
     assert "_schedulePreferencesAutosave()" in panel_block
     assert "_applyVoiceModePref" in panel_block
     assert "_populateTtsVoices" in panel_block

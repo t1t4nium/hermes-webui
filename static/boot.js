@@ -2732,6 +2732,10 @@ window._applyTitlebarProfileVisibility=_applyTitlebarProfileVisibility;
 
 function _mirrorSpeechSettingsFromServer(s){
   if(!s||typeof s!=='object') return;
+  const persistedSpeechKeys = new Set(
+    Array.isArray(s.persisted_speech_keys) ? s.persisted_speech_keys : []
+  );
+  const hasServerValue=(settingKey)=>persistedSpeechKeys.has(settingKey);
   const defaults={
     tts_enabled:false,
     tts_auto_read:false,
@@ -2744,7 +2748,6 @@ function _mirrorSpeechSettingsFromServer(s){
     voice_silence_ms:1800,
     raw_audio_mode:false,
   };
-  const hasServerValue=(settingKey)=>Object.prototype.hasOwnProperty.call(s,settingKey);
   const cachedValue=(storageKey)=>{
     try{return localStorage.getItem(storageKey);}catch(_){return null;}
   };

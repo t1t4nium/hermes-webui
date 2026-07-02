@@ -8067,6 +8067,12 @@ function _preferencesPayloadFromUi(){
   if(showBusyPlaceholderHintCb) payload.show_busy_placeholder_hint=showBusyPlaceholderHintCb.checked;
   const botNameField=$('settingsBotName');
   if(botNameField) payload.bot_name=botNameField.value;
+  Object.assign(payload,_speechPreferencesPayloadFromUi());
+  return payload;
+}
+
+function _speechPreferencesPayloadFromUi(){
+  const payload={};
   const ttsEnabledCb=$('settingsTtsEnabled');
   if(ttsEnabledCb) payload.tts_enabled=ttsEnabledCb.checked;
   const ttsAutoReadCb=$('settingsTtsAutoRead');
@@ -8638,9 +8644,14 @@ async function loadSettingsPanel(){
       },{once:false});
     }
     if(typeof window._mirrorSpeechSettingsFromServer==='function') window._mirrorSpeechSettingsFromServer(settings);
+    const persistedSpeechKeys = new Set(
+      Array.isArray(settings && settings.persisted_speech_keys)
+        ? settings.persisted_speech_keys
+        : []
+    );
     const _speechSetting=function(key,storageKey,fallback,kind){
       const stored=localStorage.getItem(storageKey);
-      if(settings&&Object.prototype.hasOwnProperty.call(settings,key)) return settings[key];
+      if(settings&&persistedSpeechKeys.has(key)) return settings[key];
       return stored===null?fallback:stored;
     };
     const _speechBool=function(key,storageKey,fallback){
@@ -11458,6 +11469,7 @@ async function saveSettings(andClose){
   const defaultMessageMode=($('settingsDefaultMessageMode')||{}).value||'steer';
   const showBusyPlaceholderHint=!!($('settingsShowBusyPlaceholderHint')||{}).checked;
   const body={};
+  Object.assign(body,_speechPreferencesPayloadFromUi());
 
   if(sendKey) body.send_key=sendKey;
   body.theme=theme;
