@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Extensions can opt into a consent-gated loopback sidecar proxy.** An extension whose manifest declares a `127.0.0.1`/`localhost` sidecar origin can now, after an explicit per-origin user consent, have WebUI proxy same-origin browser requests to that local backend — the first supported mechanism for an extension to reach a co-located sidecar without shipping its own server route. The surface is deliberately narrow and fail-closed: loopback-only origin (no SSRF; hex/decimal/userinfo/port bypasses rejected), path traversal and URL/scheme smuggling rejected on the fully-decoded form, consent bound to the exact declared origin (an origin change forces reconsent, bounded at 512 entries), auth/CSRF-gated consent, credential isolation (Cookie/Authorization/CSRF/Host/Origin/Referer stripped outbound, Set-Cookie stripped inbound, hop-by-hop headers stripped both ways), ambient proxies disabled, redirects confined to the declared origin, a 512KB response cap on both the success and error paths, and same-origin **browser provenance required on every proxied method** (not just GET). Documented in `docs/EXTENSIONS.md`. Thanks @rodboev. (#5228, #4747)
+
 - **Push-to-talk hold gesture for dictation.** Hold the mic button (or its keyboard activation) to dictate and release to stop, in addition to the existing click-to-toggle mode — a more reliable way to capture a quick voice note. The browser-reserved `Ctrl+Shift+D` chord that an earlier draft proposed was dropped (it collides with browser bookmark shortcuts); only the page-safe hold gesture ships, and the restart/teardown paths are race-hardened so there's no stuck or zombie microphone. Thanks @rodboev. (#5310, #3700)
 
 ### Fixed

@@ -5214,9 +5214,13 @@ def _handle_extension_sidecar_proxy(
     matched = _match_extension_sidecar_proxy_path(parsed.path)
     if matched is None:
         return False
-    if method == "GET" and not _check_same_origin_browser_request(
-        handler, require_provenance=True
-    ):
+    # Require same-origin browser provenance on EVERY proxied method, not just
+    # GET. Browser extensions (the only legitimate caller) always send Origin/
+    # Referer/Sec-Fetch-Site, so this costs nothing on the real path while
+    # closing the GET-vs-unsafe-method asymmetry: without it, POST/PATCH/PUT/
+    # DELETE fell through the CSRF compatibility path that intentionally admits
+    # non-browser clients, giving unsafe methods weaker provenance than GET.
+    if not _check_same_origin_browser_request(handler, require_provenance=True):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     try:
         request_body = _read_body_bytes(handler) if read_request_body else None

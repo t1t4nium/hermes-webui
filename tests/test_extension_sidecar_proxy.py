@@ -450,6 +450,40 @@ def test_extension_sidecar_proxy_get_requires_browser_provenance(monkeypatch):
     }
 
 
+def test_extension_sidecar_proxy_post_requires_browser_provenance(monkeypatch):
+    """Regression (#5228 gate): unsafe methods must require the same browser
+    provenance as GET. Before the fix only GET enforced require_provenance, so a
+    headerless (non-browser) POST fell through the CSRF compatibility path that
+    intentionally admits Origin/Referer-less clients — giving POST/PATCH/PUT/
+    DELETE weaker provenance than GET on the loopback proxy route."""
+    from api import routes
+
+    # If provenance were NOT enforced, the resolver/opener would be reached; make
+    # them explode so any regression that lets a headerless POST through fails
+    # loudly instead of silently proxying.
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("headerless POST must be rejected before proxying")
+
+    monkeypatch.setattr("api.extensions.resolve_extension_sidecar_proxy_target", _boom)
+    monkeypatch.setattr(
+        routes, "_extension_sidecar_proxy_same_origin_opener", _boom
+    )
+
+    handler = FakeHandler(b'{"ping":"pong"}')
+    # No Origin / Referer / Sec-Fetch-Site — a non-browser client.
+    handler.headers = {"Content-Type": "application/json", "Content-Length": "15"}
+
+    result = routes.handle_post(
+        handler,
+        SimpleNamespace(path="/api/extensions/templates/sidecar/v1/ping", query=""),
+    )
+    assert result is None
+    assert handler.status == 403
+    assert json.loads(handler.body.decode("utf-8")) == {
+        "error": "Cross-origin mismatch - check reverse proxy headers"
+    }
+
+
 def test_extension_sidecar_proxy_get_allows_same_origin_browser_request_without_csrf_token(monkeypatch):
     from api import routes
 
