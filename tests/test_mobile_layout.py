@@ -1597,6 +1597,17 @@ def test_touch_keyboard_inset_writes_and_clears_css_variable():
         "boot.js must compute the bottom inset from innerHeight and visualViewport geometry"
 
 
+def test_touch_keyboard_inset_ignores_pinch_zoom_scale():
+    """A pinch-zoomed viewport (vv.scale != 1) must not be read as keyboard
+    occlusion — otherwise Chromium 'force enable zoom' produces a large spurious
+    inset that jitters on pan (#5738 UX-gate hardening)."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "vv.scale" in boot_js, \
+        "boot.js must consult visualViewport.scale before treating shrinkage as keyboard occlusion"
+    assert "Math.abs((vv.scale||1)-1)>0.05" in boot_js, \
+        "boot.js must bail out of the inset when the viewport is pinch-zoomed"
+
+
 def test_touch_keyboard_inset_primes_during_visual_viewport_setup():
     """The existing visualViewport setup path must prime the inset immediately."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")

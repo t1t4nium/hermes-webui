@@ -161,6 +161,14 @@ function _syncKeyboardBottomInset(){
     return;
   }
   const vv=window.visualViewport;
+  // A pinch-zoomed viewport (vv.scale != 1) makes innerHeight - vv.height
+  // reflect the zoom, not the keyboard — on Chromium touch devices with
+  // accessibility "force enable zoom" that yields a large spurious inset that
+  // jitters on pan. Treat only the unzoomed state as keyboard occlusion.
+  if(Math.abs((vv.scale||1)-1)>0.05){
+    root.style.removeProperty('--keyboard-bottom-inset');
+    return;
+  }
   const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
   if(inset>0){
     root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
