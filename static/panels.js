@@ -9152,7 +9152,7 @@ async function loadSettingsPanel(){
         // update banner still gates the actual apply behind "Update Now".
         _schedulePreferencesAutosave();
         if(typeof checkUpdatesNow==='function'){
-          // Pass the just-selected channel EXPLICITLY so the re-check can't race
+          // Pass the just-selected channel EXPLICITLY so the re-check cannot race
           // the debounced autosave PUT and answer for the previous channel.
           const _picked=updateChannelSel.value;
           setTimeout(function(){try{checkUpdatesNow(_picked);}catch(e){}},400);
@@ -11763,7 +11763,7 @@ async function checkUpdatesNow(channelOverride){
 
   try {
     // Pass the channel explicitly when the caller has one (e.g. the dropdown
-    // just switched) so the check can't race the debounced settings autosave
+    // just switched) so the check cannot race the debounced settings autosave
     // and answer for the previous channel. Omit otherwise → server uses the
     // saved setting. (Fable UX gate.)
     const _checkBody={force:true};
