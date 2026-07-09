@@ -526,6 +526,7 @@ const MESSAGE_VIRTUAL_THRESHOLD_ROWS=80;
 const MESSAGE_VIRTUAL_BUFFER_PX=900;
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS={
   user:120,
+  process_wakeup:96,
   assistant:160,
   tool_call:400,
   default:140,
@@ -598,6 +599,7 @@ function _clearMessageVirtualHeightCache(){
   clearTimeout(_messageVirtualScrollSettleTimer);
   _messageVirtualScrollSettleTimer=0;
   _messageVirtualDeferredMeasurement=null;
+  if(typeof _clearUserRowIntrinsicHeightCache==='function') _clearUserRowIntrinsicHeightCache();
 }
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
@@ -615,7 +617,7 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
-  if(m._source === 'process_wakeup') return false;
+  if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
   const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
@@ -810,6 +812,7 @@ function _syncMessageVirtualHeightCache(visWithIdx){
 function _messageVirtualRoleForEntry(entry){
   const m=entry&&entry.m;
   if(!m) return 'default';
+  if(m._source === 'process_wakeup') return 'process_wakeup';
   if(m.role==='user') return 'user';
   if(m.role==='assistant'){
     if((Array.isArray(m.tool_calls)&&m.tool_calls.length>0)||
@@ -953,6 +956,11 @@ function _captureMessageViewportAnchor(){
         key:row&&row.dataset?String(row.dataset.messageAnchorKey||''):'',
         topOffset:rect.top-containerRect.top,
         topPadBefore,
+        // Snapshot the scroll height at capture so a later realign can detect that
+        // content grew between capture and restore — the streaming case where the
+        // anchor's topOffset is stale and realigning to it would yank a still reader
+        // backward (issue #5637).
+        scrollHeightAtCapture:container.scrollHeight,
       };
     }
   }
@@ -977,6 +985,67 @@ function _captureMessageViewportAnchor(){
 function _browserOverflowAnchorActive(el){
   if(!el) return false;
   try{ return getComputedStyle(el).overflowAnchor==='auto'; }catch(_){ return false; }
+}
+// iOS/iPadOS WebKit detection for the issue #5637 stale-anchor hold gate. CSS
+// overflow-anchor is INERT on iOS WebKit (see static/style.css — the mobile
+// content-visibility block deliberately does NOT set overflow-anchor:none because
+// it is a no-op on iOS and, on Android, re-opens the #4856/#5338 jump-to-top
+// regression). So `overflow-anchor:auto` computes on `.messages` on iOS but the
+// engine never actually holds the viewport there. The stale-anchor refusal relies
+// on that engine to hold the reader, so it is only safe on Android (working
+// overflow-anchor), NOT iOS — refusing on iOS leaves a scrolled-up reader unheld,
+// the same class as the desktop regression, one platform over.
+// Detection covers classic iPhone/iPod/iPad UAs AND iPadOS 13+, which reports a
+// desktop 'MacIntel' platform but is distinguishable by touch support (a real Mac
+// has maxTouchPoints 0). Excludes MSStream (old IE on Windows Phone false-matched
+// 'like iPhone').
+function _isIOSWebKit(){
+  try{
+    const nav=(typeof navigator!=='undefined')?navigator:null;
+    if(!nav) return false;
+    if(nav.MSStream) return false;
+    const ua=String(nav.userAgent||'');
+    if(/iP(ad|hone|od)/.test(ua)) return true;
+    // iPadOS 13+ masquerades as macOS; a Mac has no touch, an iPad does.
+    if(nav.platform==='MacIntel' && Number(nav.maxTouchPoints)>1) return true;
+  }catch(_){}
+  return false;
+}
+// Stable "native overflow-anchor holds this viewport" predicate for the issue
+// #5637 stale-anchor hold gate. The two stale-anchor refusals below assume the
+// browser's native overflow-anchor layer will hold the viewport once the JS
+// restore is refused. That is only true where the engine ACTUALLY compensates:
+//   - desktop (hover+fine-pointer): CSS keeps `.messages` at overflow-anchor:none
+//     -> engine off -> refusing leaves nothing to hold the reader. Excluded via
+//     matchMedia('(pointer:coarse)') being false.
+//   - iOS WebKit: overflow-anchor is INERT (see _isIOSWebKit) even though it
+//     computes to `auto` -> engine never holds -> refusing strands a scrolled-up
+//     reader. Excluded via _isIOSWebKit().
+//   - Android touch: overflow-anchor:auto AND the engine works -> refusing is safe,
+//     native anchoring holds. This is the ONLY platform the refusal targets.
+// We must NOT decide this with `_browserOverflowAnchorActive(#messages)` alone,
+// because `_restoreMessageViewportAnchor` temporarily writes an inline
+// `overflowAnchor:'none'` on #messages for its own scroll write and only restores
+// it on the next frame; when the realign fires every live tick that inline 'none'
+// persists across ticks, so a computed-value probe would read 'none' mid-realign
+// and wrongly classify a touch device as "desktop", letting the stale realign
+// through. A matchMedia('(pointer:coarse)') test reflects the input device and
+// cannot be mutated by that inline override, so it stays steady mid-realign;
+// desktop (fine pointer) stays false. Fall back to the computed-anchor probe when
+// matchMedia is unavailable.
+function _isTouchLikeMessageViewport(el){
+  // iOS WebKit is touch (pointer:coarse) but overflow-anchor is inert there, so the
+  // refusal's premise fails — treat it like desktop (keep the semantic realign).
+  if(_isIOSWebKit()) return false;
+  try{
+    if(typeof matchMedia==='function' && matchMedia('(pointer:coarse)').matches) return true;
+  }catch(_){}
+  // Best-effort fallback for the (today essentially non-existent) no-matchMedia
+  // environment: the computed-anchor probe can transiently read 'none' during a
+  // realign burst (see comment above), so on such a touch device this could
+  // re-admit the original yank. matchMedia('(pointer:coarse)') is universally
+  // supported in every browser this UI targets, so the primary path is what runs.
+  return _browserOverflowAnchorActive(el);
 }
 function _suppressBrowserOverflowAnchor(container){
   if(!container||!container.style) return null;
@@ -1029,6 +1098,37 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const containerRect=container.getBoundingClientRect();
   const rect=row.getBoundingClientRect();
   const targetTop=Number(anchor.topOffset)||0;
+  // Streaming stale-anchor guard (issue #5637). During a live stream, content grows
+  // ABOVE the viewport between anchor capture and this restore, so the anchor's
+  // captured topOffset is stale and the realign delta becomes a spurious few-hundred-px
+  // value that yanks a still reader backward. Detect it by content growth + absence of
+  // real input intent — NOT by a scrollTop diff, because on an overflow-anchor:auto
+  // container the browser itself moves scrollTop to compensate the growth (so a still
+  // reader's scrollTop is not stationary). _recentMessage*ScrollIntent reflects genuine
+  // touch/wheel/key input, which the browser's anchor layer never writes. If content
+  // grew since capture AND there is no recent input intent AND the realign would move
+  // scrollTop non-trivially, refuse it and let the browser overflow-anchor hold. An
+  // actively scrolling reader (recent intent) keeps the legitimate realign; legacy
+  // snapshots without the captured geometry keep prior behavior.
+  //
+  // Desktop guard (issue #5637 gate cert): the refusal is only safe where the
+  // browser's native overflow-anchor layer can actually hold the viewport, i.e.
+  // touch viewports where `.messages` computes to `overflow-anchor:auto`. On
+  // hover+fine-pointer desktops `.messages` is `overflow-anchor:none`, so refusing
+  // the realign would leave NOTHING to hold the reader after above-viewport growth
+  // — the very yank this fixes on mobile, reintroduced on desktop. Gate the refusal
+  // on `_isTouchLikeMessageViewport` so desktop keeps its semantic scrollTop realign.
+  const _realignDelta=(rect.top-containerRect.top)-targetTop;
+  const _shAtCap=Number(anchor.scrollHeightAtCapture);
+  if(Number.isFinite(_shAtCap)){
+    const _grewSinceCapture=(container.scrollHeight-_shAtCap)>4;
+    const _activeIntent=(typeof _recentMessageScrollIntent==='function' && _recentMessageScrollIntent())
+      || (typeof _recentMessageTouchScrollIntent==='function' && _recentMessageTouchScrollIntent());
+    const _touchHold=(typeof _isTouchLikeMessageViewport==='function' && _isTouchLikeMessageViewport(container));
+    if(_touchHold&&_grewSinceCapture&&!_activeIntent&&Math.abs(_realignDelta)>8){
+      return false;
+    }
+  }
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   // Mobile-only jump fix: the resting overflow-anchor on .messages is `auto` on
   // touch devices (CSS media query keeps it `none` only for hover+fine-pointer
@@ -1161,6 +1261,76 @@ function _messageViewportIntersectsRenderedRow(){
   }
   return false;
 }
+// #5637/#5638 follow-up — kill the content-visibility scrollHeight collapse at its
+// source. A virtualization wipe-and-rebuild recreates user rows as FRESH elements, which
+// discards content-visibility:auto's last-remembered size, so an off-screen user row
+// falls back to the flat `contain-intrinsic-size: auto 96px` estimate in the stylesheet.
+// A tall user row (e.g. a long paste) then collapses scrollHeight by (realHeight-96px)
+// the instant it's rebuilt off-screen, and the browser either force-clamps scrollTop
+// (dTop≈dH layer-1 jump) or re-anchors to a far row (dTop≫dH browser re-anchor jump) —
+// both mobile jump-back classes trace to this one collapse. Remember each user row's
+// height keyed by its STABLE session-relative index so a rebuild reserves the real
+// height, not 96px. Measured height (exact) wins; before a row is ever measured, a
+// content-length estimate reserves the bulk so the fresh-element frame doesn't collapse
+// either. Refreshed every measure pass, so edits self-heal. Desktop rests at
+// content-visibility:visible (intrinsic-size ignored) → inert there, zero behavior change.
+const _userRowIntrinsicHeightBySessionIdx=Object.create(null);
+// Cleared on session switch alongside _messageVirtualHeightCache (both are
+// per-session measured-height caches keyed by session-relative index). Without this,
+// keys collide across sessions — _messageSessionIndexForRawIdx = _messageSessionIndexBase()
+// + rawIdx and the base is 0 for the common non-offset session — so a new session's
+// off-screen user rows would inherit the previous session's remembered heights and
+// inflate scrollHeight until each is re-measured. Delete keys in place to keep the
+// const binding stable for any closure that captured it.
+function _clearUserRowIntrinsicHeightCache(){
+  for(const k in _userRowIntrinsicHeightBySessionIdx) delete _userRowIntrinsicHeightBySessionIdx[k];
+}
+function _rememberUserRowIntrinsicHeight(sessionMsgIdx, height){
+  const key=Number(sessionMsgIdx);
+  if(!Number.isFinite(key)||!(height>0)) return;
+  _userRowIntrinsicHeightBySessionIdx[key]=Math.round(height);
+}
+function _estimateUserRowIntrinsicHeight(rawText){
+  const t=String(rawText||'');
+  if(!t) return 96;
+  // ~48 half-width chars/line at the mobile user-bubble width (≈90% of a phone viewport),
+  // ~22px per line + ~24px row chrome; floored at the stylesheet's 96px so a short row never
+  // reserves LESS than today (estimate can only add reserved height for tall rows, never
+  // regress). CJK / full-width characters occupy ~2 columns each, so a Chinese/Japanese/
+  // Korean paste wraps at ~24 chars/line — counting them as 1 badly UNDER-estimates the
+  // height (a 3k-char CJK paste is ~2x taller than the naive length/48 guess). Weight wide
+  // characters as 2 columns so the fresh-row reserve is close to reality even for a row the
+  // reader has never scrolled into view (content-visibility:auto reports only the reserve
+  // for a never-painted row, so a good estimate is the only backstop there). Uses a Unicode
+  // range test (no \p{} — keep the RegExp engine-portable across the supported browsers).
+  const explicitLines=(t.match(/\n/g)||[]).length+1;
+  let columns=0;
+  for(let i=0;i<t.length;i++){
+    const c=t.charCodeAt(i);
+    // CJK Unified + Ext-A, Hiragana/Katakana, Hangul, CJK symbols/punctuation, full-width forms.
+    const wide=(c>=0x1100&&c<=0x115F)||(c>=0x2E80&&c<=0xA4CF)||(c>=0xAC00&&c<=0xD7A3)||
+               (c>=0xF900&&c<=0xFAFF)||(c>=0xFE30&&c<=0xFE4F)||(c>=0xFF00&&c<=0xFF60)||(c>=0xFFE0&&c<=0xFFE6);
+    columns+=wide?2:1;
+  }
+  const wrapLines=Math.ceil(columns/48);
+  const lines=Math.max(explicitLines, wrapLines);
+  return Math.max(96, Math.round(lines*22+24));
+}
+function _applyUserRowIntrinsicHeight(row, rawText){
+  if(!row||!row.style||!row.dataset) return;
+  const key=Number(row.dataset.sessionMsgIdx);
+  const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
+  const estimate=_estimateUserRowIntrinsicHeight(rawText!=null?rawText:row.dataset.rawText);
+  // Reserve the LARGER of the remembered measurement and the content estimate. A remembered
+  // height can be a PARTIAL paint: a user row taller than the viewport that only ever had its
+  // top slice scrolled through content-visibility:auto reports just the painted portion, not
+  // its full height — persisting that would under-reserve and let scrollHeight collapse on the
+  // next rebuild (the jump-back). Taking the max means a good estimate floors the reserve even
+  // when the measurement under-read, while a full measurement (row shorter than the viewport,
+  // fully painted) still wins when it exceeds the estimate.
+  const h=Math.max(remembered, estimate);
+  if(h>0) row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
+}
 function _measureMessageVirtualRow(inner, entry){
   if(!inner||!entry) return 0;
   const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
@@ -1174,6 +1344,16 @@ function _measureMessageVirtualRow(inner, entry){
       totalHeight+=Math.max(0, sibling.getBoundingClientRect().height||0);
       sibling=sibling.nextElementSibling;
     }
+  }
+  // Persist the measured height so a later wipe-and-rebuild of this user row reserves its
+  // real off-screen height instead of collapsing to the 96px estimate (the collapse that
+  // clamps/re-anchors the viewport — #5637/#5638 mobile jump-back, both classes). The
+  // typeof guard keeps _measureMessageVirtualRow runnable in the node test harnesses that
+  // extract it without this helper (they stub every collaborator by name).
+  if(totalHeight>0 && primary.dataset && primary.dataset.role==='user'
+     && typeof _rememberUserRowIntrinsicHeight==='function'){
+    _rememberUserRowIntrinsicHeight(primary.dataset.sessionMsgIdx, totalHeight);
+    primary.style.containIntrinsicSize='auto '+Math.round(totalHeight)+'px';
   }
   return totalHeight;
 }
@@ -1204,6 +1384,70 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     _scheduleMessageVirtualMeasurementRefresh(virtualWindow);
   }else{
     _markMessageVirtualMeasurementsSettled(virtualWindow);
+  }
+}
+// #5638 follow-up — the non-virtualized transcript path (the #4325 opt-out, where
+// _virtualizeTranscript===false renders every row with no windowing) never runs the
+// virtualized measure pass above, so a user row's real height is never remembered.
+// content-visibility:auto on user rows then collapses a freshly-rebuilt off-screen tall
+// user row to its flat contain-intrinsic-size estimate on every renderMessages() rebuild
+// (each streaming frame does inner.innerHTML='' then rebuilds all rows as FRESH elements
+// that have never painted at full size). scrollHeight shrinks by (realHeight-estimate),
+// the browser force-clamps scrollTop, and the viewport jumps backward — the desktop/mobile
+// jump-back, with JS=none because the clamp is the browser's own.
+//
+// The reliable moment to read a user row's REAL height is JUST BEFORE the wipe: the old
+// rows are still in the DOM, laid out at full height (content-visibility:auto reports the
+// true rect height once an element has painted, at any scroll position — verified: a tall
+// off-screen user row still measures its real height pre-wipe). A POST-render read is
+// unreliable because a freshly-rebuilt off-screen row reports its collapsed reserve, not
+// its real size, so it would persist the wrong (small) value. Capture pre-wipe, keyed by
+// the stable session-relative index, so the rebuild's _applyUserRowIntrinsicHeight reserves
+// the real off-screen height and scrollHeight stays stable across the rebuild.
+// Desktop rests at content-visibility:visible (intrinsic-size ignored) → inert there.
+function _rememberRenderedUserRowIntrinsicHeights(){
+  const container=$('messages');
+  const inner=$('msgInner');
+  if(!container||!inner) return;
+  const rows=inner.querySelectorAll('.msg-row[data-role="user"][data-msg-idx]');
+  if(!rows.length) return;
+  const cRect=container.getBoundingClientRect();
+  // Only trust a row that is currently WITHIN (or straddling) the viewport: such a row has
+  // been painted at full size, so getBoundingClientRect().height is its REAL height. A row
+  // that content-visibility:auto is skipping (fully off-screen and never painted this
+  // session) reports only its contain-intrinsic-size reserve — persisting THAT would poison
+  // the remembered height with the collapsed value and defeat the estimate backstop for a
+  // never-seen row. The viewport intersection test is the reliable "has this row painted?"
+  // signal (an off-screen row that WAS painted earlier keeps its real height too, but we
+  // don't need it here — it either was captured on a prior in-view pass or the estimate
+  // covers it). Small margin so a row just above/below the fold still counts as painted.
+  const margin=Math.max(0, cRect.height||0);
+  for(let i=0;i<rows.length;i++){
+    const row=rows[i];
+    if(!row||!row.dataset||!row.style) continue;
+    const r=row.getBoundingClientRect();
+    const measured=Math.max(0, r.height||0);
+    if(!(measured>0)) continue;
+    // In-viewport (with a one-screen margin) ⇒ painted ⇒ height is trustworthy — but only
+    // for a row that FITS the viewport. A row taller than the viewport only ever paints the
+    // intersecting slice under content-visibility:auto, so its measured height is a PARTIAL
+    // value, not the full row. Floor every persisted height at the content estimate so a
+    // partial paint can never lower the reserve below a reasonable full-row guess; a full
+    // paint (short row) still wins when it exceeds the estimate.
+    const inView=(r.bottom>=cRect.top-margin)&&(r.top<=cRect.bottom+margin);
+    if(!inView) continue;
+    const estimate=(typeof _estimateUserRowIntrinsicHeight==='function')
+      ? _estimateUserRowIntrinsicHeight(row.dataset.rawText) : 0;
+    const h=Math.max(measured, estimate);
+    if(!(h>0)) continue;
+    const key=Number(row.dataset.sessionMsgIdx);
+    const remembered=Number.isFinite(key)?Number(_userRowIntrinsicHeightBySessionIdx[key])||0:0;
+    // Keep the tallest reserve seen — a row mid-collapse (rebuild transient) can report a
+    // shrunken size; never let that overwrite a good taller remembered value.
+    if(h>=remembered && typeof _rememberUserRowIntrinsicHeight==='function'){
+      _rememberUserRowIntrinsicHeight(row.dataset.sessionMsgIdx, h);
+      row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
+    }
   }
 }
 function _scheduleMessageVirtualizedRender(force){
@@ -2415,7 +2659,24 @@ function _modelStateForSelect(sel, modelId){
   if(!value) return {model:'',model_provider:null};
   const explicitProvider=_providerFromModelValue(value);
   if(explicitProvider) return {model:value,model_provider:explicitProvider};
-  const opt=sel&&sel.selectedOptions&&sel.selectedOptions[0];
+  // Resolve the provider from the option whose VALUE matches the requested
+  // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
+  // /tab switch or a model-list rebuild the dropdown transiently still has the
+  // PREVIOUS profile's default option selected (e.g. an ollama model), so reading
+  // selectedOptions[0] would stamp that foreign provider onto a model it doesn't
+  // own — which is then persisted into the session's model_provider and re-sent
+  // on every turn, bricking it with a "Provider 'X'…no API key" error for a
+  // provider the session never used.
+  let opt=null;
+  const selected=sel&&sel.selectedOptions&&sel.selectedOptions[0];
+  // Prefer the currently-selected option ONLY when it actually is the requested
+  // model — this preserves the user's exact pick in the same-value/different-
+  // provider collision case (two providers offering the same model id).
+  if(selected&&String(selected.value||'')===value){
+    opt=selected;
+  }else if(sel&&sel.options){
+    opt=Array.from(sel.options).find(o=>String(o.value||'')===value)||null;
+  }
   const provider=String(_getOptionProviderId(opt)||'').trim();
   return {model:value,model_provider:(provider&&provider!=='default')?provider:null};
 }
@@ -2864,6 +3125,11 @@ async function populateModelDropdown(opts={}){
         const opt=document.createElement('option');
         opt.value=m.id;
         opt.textContent=m.label;
+        if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
+          opt.dataset.fast='1';
+        }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
+          opt.dataset.fast='0';
+        }
         og.appendChild(opt);
         _dynamicModelLabels[m.id]=m.label||m.id;
       }
@@ -2962,6 +3228,11 @@ function _addLiveModelsToSelect(provider, models, sel){
     opt.textContent=m.label||m.id;
     opt.title='Live model — fetched from provider';
     opt.dataset.provider=provider;
+    if(m && (m.supports_fast_tier === true || String(m.supports_fast_tier).toLowerCase()==='true')){
+      opt.dataset.fast='1';
+    }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
+      opt.dataset.fast='0';
+    }
     providerGroup.appendChild(opt);
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
@@ -9066,7 +9337,15 @@ async function applyUpdates(){
     const stashConflictMessages=[];
     const baselineServerIdentity = await _readHealthServerIdentity();
     for(const target of targets){
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
+      // Send the channel the CHECK reported for this target (what was actually
+      // offered in the banner), not a fresh settings read — otherwise a channel
+      // switch whose debounced autosave hasn't landed yet races apply, which
+      // would then read the OLD saved channel (Codex gate). webui carries the
+      // channel; agent is channel-neutral server-side so omitting it is fine.
+      const _applyBody={target};
+      const _ch=window._updateData?.[target]?.channel;
+      if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
+      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
       if(!res.ok){
         _showUpdateError(target,res);
         resetApplyButton(0);
@@ -9099,10 +9378,127 @@ function _showUpdateError(target,res){
   } else {
     showToast(msg);
   }
-  // Show "Force update" button when the error is recoverable by a hard reset
+  // Show "Force update" button ONLY for errors recoverable by a destructive
+  // hard reset. Lock-only failures are routed to a separate non-destructive
+  // "Clear lock and retry update" button (BRICK-2 fix for PR #5688: a lock
+  // error should never invoke apply_force_update, which would discard local
+  // modifications).
   if(forceBtn&&(res.conflict||res.diverged)){
     forceBtn.dataset.target=target;
     forceBtn.style.display='inline-block';
+  }
+  // Show "Clear lock and retry update" when the only failure was a stale
+  // git lock. This calls the new non-destructive /api/updates/clear_lock
+  // endpoint, which probes the lock for a holder and refuses if held.
+  const clearLockBtn=$('btnClearUpdateLock');
+  if(clearLockBtn&&res.lock_conflict){
+    clearLockBtn.dataset.target=target;
+    clearLockBtn.style.display='inline-block';
+  }
+}
+async function applyClearUpdateLock(btn){
+  if(window._clearLockInFlight) return;
+  const target=btn.dataset.target;
+  if(!target) return;
+  window._clearLockInFlight=true;
+  btn.disabled=true;
+  const originalLabel=btn.textContent;
+  btn.textContent='Checking lock…';
+  try{
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
+    if(res.ok){
+      sessionStorage.removeItem('hermes-update-checked');
+      sessionStorage.removeItem('hermes-update-dismissed');
+      showToast('Update applied — restarting…');
+      _waitForServerThenReload({});
+    } else if(res.lock_held){
+      // v2.2: server returns manual-instruction. Show the exact `rm`
+      // command + a one-click "I've removed it, retry update" affordance
+      // that POSTs the same endpoint a second time (now that the user
+      // has presumably removed the lock, the server's success branch
+      // runs the normal non-destructive apply).
+      _renderLockManualInstruction(target, res);
+    } else {
+      const msg='Could not check the lock: '+(res.message||'unknown error');
+      const errEl=$('updateError');
+      if(errEl){errEl.textContent=msg;errEl.style.display='block';}
+      else showToast(msg);
+    }
+  }catch(e){
+    const msg='Lock-check request failed: '+((e&&e.message)||String(e));
+    const errEl=$('updateError');
+    if(errEl){errEl.textContent=msg;errEl.style.display='block';}
+    else showToast(msg);
+  }finally{
+    window._clearLockInFlight=false;
+    btn.disabled=false;
+    btn.textContent=originalLabel;
+  }
+}
+function _renderLockManualInstruction(target, res){
+  // Replace the inline `updateError` text with a richer block that shows
+  // the exact manual command and offers a one-click retry button. The
+  // "retry" handler re-invokes `applyClearUpdateLock`; this time, with
+  // the lock gone, the server's success branch runs the normal apply.
+  const cmd = res.manual_command || ('rm -f ' + (res.well_known_lock_path || '.git/index.lock'));
+  const errEl=$('updateError');
+  if(!errEl){
+    showToast('Lock present. Run: '+cmd);
+    return;
+  }
+  errEl.style.display='block';
+  errEl.innerHTML='';
+  const intro=document.createElement('div');
+  intro.style.marginBottom='6px';
+  intro.textContent='A stale .git/index.lock is present. The server cannot remove it safely — please run this command on the host:';
+  errEl.appendChild(intro);
+  const code=document.createElement('pre');
+  code.style.background='rgba(0,0,0,0.05)';
+  code.style.padding='6px';
+  code.style.margin='4px 0';
+  code.style.fontFamily='ui-monospace,monospace';
+  code.style.borderRadius='4px';
+  code.style.whiteSpace='pre-wrap';
+  code.style.wordBreak='break-all';
+  code.textContent=cmd;
+  errEl.appendChild(code);
+  const actions=document.createElement('div');
+  actions.style.display='flex';
+  actions.style.gap='8px';
+  actions.style.flexWrap='wrap';
+  const copyBtn=document.createElement('button');
+  copyBtn.type='button';
+  copyBtn.className='update-btn';
+  copyBtn.textContent='Copy command';
+  copyBtn.onclick=async()=>{
+    try{
+      if(navigator.clipboard&&navigator.clipboard.writeText){
+        await navigator.clipboard.writeText(cmd);
+        copyBtn.textContent='Copied';
+        setTimeout(()=>{ copyBtn.textContent='Copy command'; }, 1500);
+      } else {
+        copyBtn.textContent='Clipboard unavailable';
+      }
+    } catch(_){
+      copyBtn.textContent='Copy failed';
+    }
+  };
+  actions.appendChild(copyBtn);
+  const retryBtn=document.createElement('button');
+  retryBtn.type='button';
+  retryBtn.className='update-btn update-primary';
+  retryBtn.textContent="I've removed the lock — retry update";
+  retryBtn.dataset.target=target;
+  retryBtn.onclick=()=>{ applyClearUpdateLock(retryBtn); };
+  actions.appendChild(retryBtn);
+  errEl.appendChild(actions);
+  if(Array.isArray(res.other_locks)&&res.other_locks.length){
+    const other=document.createElement('div');
+    other.style.marginTop='6px';
+    other.style.fontSize='11px';
+    other.style.opacity='0.85';
+    other.textContent='Other lock files also present: '+res.other_locks.join(', ');
+    errEl.appendChild(other);
   }
 }
 function _normalizeHealthServerIdentity(rawIdentity){
@@ -9151,7 +9547,7 @@ async function forceUpdate(btn){
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';
@@ -13222,6 +13618,43 @@ window._fixMobileScrollJank=function _fixMobileScrollJank(){
   });
 };
 
+// Desktop stale-snapshot residue (issue #5637 follow-up). Reached only when
+// _restoreMessageViewportAnchor already CONCEDED (anchor row unrecoverable by its
+// per-tier lookup) and the desktop fallback would otherwise write the ABSOLUTE
+// snapshot.top — which is stale once above-viewport content grew since capture,
+// yanking a still reader backward. The correct hold is the app's own realign
+// idiom: shift the CURRENT scrollTop by how far the anchor row moved since capture,
+// `scrollTop += (currentOffset - capturedOffset)` (mirrors _restoreMessageViewportAnchor
+// ui.js and _compensateScrollForMeasurementDelta). NOT `snapshot.top + delta`: a
+// row's offset is scroll-relative (rect.top - containerRect.top = rowContentPos -
+// scrollTop), so only a delta applied to the LIVE scrollTop holds the row put
+// regardless of where scrollTop was carried to. Returns the realign delta (may be
+// 0), or null when the anchor row can't be measured under the SAME per-tier guard
+// _restoreMessageViewportAnchor uses (key -> sessionIdx, never the rawIdx
+// degradation — rawIdx maps to a different message after a virtualization
+// re-window, ui.js per-tier guard) so the caller can fall back to the topPad-delta
+// idiom or keep raw rather than guessing.
+function _desktopAnchorRealignDelta(container, anchor){
+  if(!container||!anchor||typeof container.querySelector!=='function') return null;
+  const capturedOffset=Number(anchor.topOffset);
+  if(!Number.isFinite(capturedOffset)) return null;
+  const anchorKey=String(anchor.key||'');
+  let row=anchorKey
+    ? Array.from(container.querySelectorAll('[data-message-anchor-key]')).find(el=>el&&el.dataset&&el.dataset.messageAnchorKey===anchorKey)
+    : null;
+  if(row&&row.getClientRects&&row.getClientRects().length===0) row=null;
+  const sessionIdx=Number(anchor.sessionIdx);
+  if(!row&&Number.isFinite(sessionIdx)) row=container.querySelector(`[data-session-msg-idx="${sessionIdx}"]`);
+  // Per-tier guard mirror (ui.js _restoreMessageViewportAnchor): a genuinely-gone
+  // anchor misses key AND sessionIdx -> concede (null). Do NOT degrade to rawIdx.
+  if(!row) return null;
+  if(typeof row.getBoundingClientRect!=='function') return null;
+  if(row.getClientRects&&row.getClientRects().length===0) return null;
+  const containerRect=container.getBoundingClientRect();
+  const rect=row.getBoundingClientRect();
+  const currentOffset=rect.top-containerRect.top;
+  return currentOffset-capturedOffset;
+}
 function _restoreMessageScrollSnapshotSameFrame(snapshot){
   const el=$('messages');
   if(!el||!snapshot) return;
@@ -13259,8 +13692,76 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
     const target=(snapshot.pinned===true&&Number.isFinite(bottom))
       ? maxTop-Math.max(0,bottom)
       : Number(snapshot.top)||0;
+    // Streaming stale-snapshot guard (issue #5637). The userUnpinned check above is
+    // defeated when a live stream re-pins the state machine (a scrollHeight-collapse
+    // scroll event flips userUnpinned back to false even though the reader is up in
+    // history), so this absolute snapshot.top write still fires and yanks a still
+    // reader — snapshot.top was captured before the streaming chunk grew above-viewport
+    // height, so it is stale. Mirror the realign guard: if content grew since the
+    // snapshot AND there is no recent real input intent AND the write would move
+    // scrollTop non-trivially, refuse it and let the browser overflow-anchor hold.
+    // Pinned tail-followers (target is bottom-relative, not snapshot.top) are
+    // unaffected; an actively scrolling reader has intent and keeps the restore.
+    //
+    // Desktop guard (issue #5637 gate cert): like the realign guard, this refusal
+    // only holds where the browser's native overflow-anchor layer is active (touch
+    // viewports, `.messages` computes to `overflow-anchor:auto`). Desktop `.messages`
+    // is `overflow-anchor:none`, so refusing the absolute fallback write there would
+    // leave the reader unheld AND latch `_messageUserUnpinned=true`. Gate on
+    // `_isTouchLikeMessageViewport` so desktop keeps its absolute snapshot.top restore.
+    const _snapSH=Number(snapshot.scrollHeight);
+    const _grewSinceSnap=Number.isFinite(_snapSH)&&_snapSH>0&&(el.scrollHeight-_snapSH)>4;
+    const _fbActiveIntent=(typeof _recentMessageScrollIntent==='function' && _recentMessageScrollIntent())
+      || (typeof _recentMessageTouchScrollIntent==='function' && _recentMessageTouchScrollIntent());
+    const _fbTouchHold=(typeof _isTouchLikeMessageViewport==='function' && _isTouchLikeMessageViewport(el));
+    if(_fbTouchHold && snapshot.pinned!==true && _grewSinceSnap && !_fbActiveIntent
+       && Math.abs((Math.max(0,Math.min(target,maxTop)))-el.scrollTop)>8){
+      _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
+      _messageUserUnpinned=true;
+      _scrollPinned=false;
+      _nearBottomCount=0;
+      return;
+    }
+    // Desktop stale-snapshot residue fix (issue #5637 follow-up, PR #5742 round-3).
+    // On desktop (overflow-anchor:none) the touch refusal above does NOT apply — the
+    // reader must be actively held, so we write scrollTop. The ABSOLUTE snapshot.top is
+    // stale once above-viewport content grew since capture. Use the app's own realign
+    // idiom instead: shift the CURRENT scrollTop by how far the anchor row moved since
+    // capture. `scrollTop += (currentOffset - capturedOffset)` holds the row put no
+    // matter where scrollTop was carried (a row's offset is scroll-relative), which the
+    // staged `snapshot.top + delta` cannot. No arbiter: the realign is a no-op when
+    // already aligned (delta ~ 0) and heals when not. Only when the anchor row is
+    // genuinely gone (per-tier lookup concedes, no rawIdx degradation) do we fall back
+    // to the topPad-delta idiom, then to raw. Pinned/near-bottom readers took the
+    // bottom-relative target above and never reach here as unpinned.
+    let _fbTarget=Math.max(0,Math.min(target,maxTop));
+    if(!_fbTouchHold && snapshot.pinned!==true){
+      const _realign=_desktopAnchorRealignDelta(el, snapshot.anchor);
+      if(_realign!==null){
+        // Anchor row measurable: realign from the LIVE scrollTop (app idiom).
+        _fbTarget=Math.max(0,Math.min(el.scrollTop+_realign, maxTop));
+      }else{
+        // Anchor row genuinely gone. Mirror the topPad-delta idiom the anchor already
+        // carries (topPadBefore): shift by the growth of the virtual top spacer since
+        // capture so the reader is held by the same amount the content above moved.
+        const _padNow=(function(){
+          const s=el.querySelector('[data-virtual-spacer="before"]');
+          return s?(parseFloat(s.style.height||'0')||0):NaN;
+        })();
+        const _padBeforeRaw=snapshot.anchor&&snapshot.anchor.topPadBefore;
+        const _padBefore=Number(_padBeforeRaw);
+        // Require an ACTUAL captured topPadBefore (not null/undefined): Number(null) is 0,
+        // which would otherwise add the ENTIRE current spacer height to scrollTop and fling
+        // the reader far from their content (greptile P1). Only apply when it was really
+        // captured; else keep the raw fallback target.
+        if(_padBeforeRaw!=null&&Number.isFinite(_padNow)&&Number.isFinite(_padBefore)){
+          _fbTarget=Math.max(0,Math.min(el.scrollTop+(_padNow-_padBefore), maxTop));
+        }
+        // else: no measurable anchor and no topPad geometry -> keep raw target.
+      }
+    }
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-    el.scrollTop=Math.max(0,Math.min(target,maxTop));
+    el.scrollTop=_fbTarget;
   }
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
   if(snapshot.pinned===true){
@@ -13402,6 +13903,36 @@ function _assistantTurnAnchorSettledFinalAnswer(message, content, context){
     return null;
   }
 }
+// Re-anchor a pinned/tail-following reader to the settled bottom after a full
+// renderMessages() rebuild, eliminating the one-frame mid-stream jitter. MUST be scheduled
+// in a MICROTASK from the end of renderMessages (see the queueMicrotask call site), NOT run
+// synchronously. Why: the mid-stream re-render bug is that renderMessages wipes #msgInner
+// then rebuilds, and the pinned tail-follow path (scrollIfPinned → scrollToBottom) writes
+// scrollTop while still INSIDE the render sync stack, where the browser reports a TRANSIENT
+// scrollHeight a few px short of the settled value (layout is batched — every geometry read
+// inside the sync stack returns the mid-settle height). So scrollToBottom lands scrollTop a
+// little HIGH (short of the true tail); that intermediate is painted this frame and the
+// settle rAF corrects it the next frame → a fast ~1-row back-and-forth bounce (~82px). A
+// microtask runs AFTER the sync stack unwinds (layout has flushed, so scrollHeight/clientHeight
+// are the settled values) but BEFORE the browser paints — so writing the now-correct settled
+// max here lands the tail exactly and the short intermediate never reaches the screen. Only
+// fires for a pre-wipe tail-follower left short of the settled max, so an unpinned reader
+// parked in history is never moved (orthogonal to the unpinned jump-back class). The
+// _programmaticScroll latch (armed at the wipe) keeps the scroll listener from misreading
+// this write as a manual unpin. Idempotent: a no-op once scrollTop already equals the max.
+function _reanchorPinnedTailAfterRender(wasNearTail){
+  if(!wasNearTail) return;
+  const el=$('messages');
+  if(!el) return;
+  const settledMax=Math.max(0, el.scrollHeight-el.clientHeight);
+  if(el.scrollTop < settledMax-1){
+    _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+    el.scrollTop=settledMax;
+    _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
+    _nearBottomCount=2;
+    _scrollPinned=true;
+  }
+}
 function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   // Terminal stream renders can happen after S.activeStreamId is cleared.
   // In that case, preserveScroll asks the normal pin-state helper to decide:
@@ -13427,6 +13958,22 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
     return;
   }
   if(S.activeStreamId){
+    // Mid-stream re-render (tool completion, activity-scene refresh, clarify echo).
+    // renderMessages() wipes #msgInner (inner.innerHTML='') then rebuilds; that wipe
+    // collapses scrollHeight toward the empty-table height, and the browser is FORCED
+    // to clamp #messages.scrollTop down to the new (near-zero) max. For a reader who
+    // scrolled UP into history (unpinned), scrollIfPinned() is a no-op — so it does NOT
+    // undo that clamp, and the reader is stranded at the top (the scroll jump-back). The
+    // wipe-to-empty clamp is a browser primitive (device-agnostic; JS never writes the
+    // scrollTop), so the passive no-op cannot preserve position here. renderMessages()
+    // captured a pre-wipe snapshot for exactly this case (its scrollSnapshot init fires
+    // when _messageUserUnpinned), so restore the unpinned reader's viewport instead of
+    // the no-op. Pinned/tail-following readers keep scrollIfPinned() (correct live-follow).
+    if(_messageUserUnpinned && scrollSnapshot){
+      _restoreMessageScrollSnapshot(scrollSnapshot);
+      _maybeShowNewMessageScrollCue(scrollSnapshot);
+      return;
+    }
     scrollIfPinned();
     return;
   }
@@ -13595,6 +14142,29 @@ function renderMessages(options){
   // Mobile scroll-jank fix: temporarily disable overflow-anchor so Chromium
   // cannot re-anchor to the topmost row during the DOM wipe-and-rebuild gap.
   if(window._fixMobileScrollJank) window._fixMobileScrollJank();
+  // Capture whether the reader was at/near the tail BEFORE the wipe. A tail-follower
+  // hit by a mid-stream re-render gets a one-frame jitter: the wipe+rebuild lands the
+  // sync scrollTop write against a transient layout whose above-viewport height is a
+  // few px short of the settled value, so the browser clamps scrollTop a little high;
+  // the settle rAF corrects it the next frame, producing a fast ~1-row back-and-forth
+  // bounce. We remember the pre-wipe near-tail state here (geometry, not closure pin
+  // flags — the wipe's clamp scroll event can transiently perturb those) so the tail
+  // of renderMessages can re-anchor to the settled bottom before the intermediate is
+  // painted. See _reanchorPinnedTailAfterRender + its queueMicrotask call site.
+  const _preWipeNearTail=(()=>{
+    const _m=$('messages');
+    if(!_m) return false;
+    return (_m.scrollHeight-_m.scrollTop-_m.clientHeight)<=8;
+  })();
+  // Pre-wipe capture: read the still-laid-out user rows' REAL heights before the wipe below
+  // destroys them, and persist so the rebuild reserves the real off-screen height. This is
+  // the non-virtualized analog of #5638's virtualized measure pass (which never runs when
+  // _virtualizeTranscript===false). Without it, a fresh off-screen tall user row reserves
+  // only the flat contain-intrinsic-size estimate, scrollHeight shrinks, and the browser
+  // clamps scrollTop → the jump-back. Reading pre-wipe (not post-render) is what makes the
+  // measurement reliable — the old elements have painted, so their rect height is real even
+  // off-screen; a post-render read of a fresh off-screen row returns its collapsed reserve.
+  if(typeof _rememberRenderedUserRowIntrinsicHeights==='function') _rememberRenderedUserRowIntrinsicHeights();
   // The DOM wipe can briefly collapse #msgInner to zero height, causing the
   // browser to clamp #messages.scrollTop to 0 and emit a scroll event.  That
   // event is a render artifact, not user intent; if the scroll listener sees it
@@ -13851,11 +14421,13 @@ function renderMessages(options){
         }
       }
     }
+    const isProcessWakeup=m&&m._source==='process_wakeup';
     const isUser=m.role==='user';
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
     const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
+    const rowDisplayContent=displayContent;
     if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
       content='';
     }
@@ -13925,6 +14497,42 @@ function renderMessages(options){
       continue;
     }
 
+    if(isProcessWakeup){
+      currentAssistantTurn=null;
+      let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
+      if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
+      const processText=String(rowDisplayContent||'').trim();
+      const processFootHtml=`<div class="msg-foot">${timeHtml}<span class="msg-actions">${copyBtn}</span></div>`;
+      const processTextHtml=processText?`<pre class="process-wakeup-text">${esc(processText)}</pre>`:'';
+      const nextRowHtml=`<div class="process-wakeup-notice"><div class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></div>${filesHtml}<div class="msg-body process-wakeup-body">${processTextHtml}</div>${processFootHtml}</div>`;
+      if(row){
+        row.className='msg-row process-wakeup-row';
+        row.id=_userMessageDomId(rawIdx);
+        row.dataset.msgIdx=rawIdx;
+        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+        row.dataset.role='process_wakeup';
+        delete row.dataset.editing;
+        if(row.dataset.rawText!==processText||row.innerHTML!==nextRowHtml){
+          row.dataset.rawText=processText;
+          row.innerHTML=nextRowHtml;
+        }
+      }else{
+        row=document.createElement('div');
+        row.className='msg-row process-wakeup-row';
+        row.id=_userMessageDomId(rawIdx);
+        row.dataset.msgIdx=rawIdx;
+        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+        row.dataset.role='process_wakeup';
+        row.dataset.rawText=processText;
+        row.innerHTML=nextRowHtml;
+      }
+      inner.appendChild(row);
+      userRows.set(rawIdx, row);
+      continue;
+    }
+
     if(isUser){
       currentAssistantTurn=null;
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
@@ -13932,6 +14540,7 @@ function renderMessages(options){
       const newRawText=String(displayContent).trim();
       const nextRowHtml=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       if(row){
+        row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
         row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
@@ -13953,6 +14562,14 @@ function renderMessages(options){
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
       }
+      // Reserve this user row's real off-screen height up front so a wipe-and-rebuild
+      // does not collapse scrollHeight to the flat 96px estimate (the collapse that
+      // clamps/re-anchors the viewport on mobile — #5637/#5638, both jump classes). Uses
+      // the remembered measured height when this row has been measured before, else a
+      // content-length estimate; the measure pass refines it exactly next frame. The
+      // typeof guard keeps renderMessages runnable in the node test harnesses that
+      // extract it without this helper (they stub every collaborator by name).
+      if(typeof _applyUserRowIntrinsicHeight==='function') _applyUserRowIntrinsicHeight(row, newRawText);
       inner.appendChild(row);
       userRows.set(rawIdx, row);
       continue;
@@ -14929,6 +15546,20 @@ function renderMessages(options){
     }
   }
   _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
+  // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
+  // not synchronously: inside this render sync stack the browser still reports a transient
+  // scrollHeight (layout is batched), so a synchronous re-anchor would read the SAME short
+  // value scrollToBottom already clamped against and be a no-op. The microtask runs after the
+  // stack unwinds (scrollHeight has flushed to the settled value) but before the browser
+  // paints this frame, so writing the settled max lands the tail exactly and the ~1-row high
+  // intermediate never reaches the screen. Only re-anchors a pre-wipe tail-follower left short
+  // of the settled max — an unpinned reader parked in history is never moved (orthogonal to
+  // the unpinned jump-back class). See _reanchorPinnedTailAfterRender for the full rationale.
+  // (typeof guards mirror the _deferClearProgrammaticScroll call below so standalone
+  // renderMessages() test harnesses that don't define these helpers still run.)
+  if(typeof queueMicrotask==='function' && typeof _reanchorPinnedTailAfterRender==='function'){
+    queueMicrotask(()=>_reanchorPinnedTailAfterRender(_preWipeNearTail));
+  }
   _recycleStash.clear();
   if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll(160);
 }
@@ -17282,7 +17913,18 @@ if(!S._expandedDirs) S._expandedDirs=new Set();
 if(!S._dirCache) S._dirCache={};
 
 function renderFileTree(){
-  const box=$('fileTree');box.innerHTML='';
+  const box=$('fileTree');
+  // #5657: capture the scroll position before wiping the container. box.innerHTML=''
+  // detaches every row, collapsing scrollHeight so the browser clamps scrollTop to 0;
+  // without this, every expand/collapse, breadcrumb nav, refresh, and hidden-files
+  // toggle that re-runs renderFileTree() teleports the reader back to the top of a
+  // long tree. Restored only after the normal render tail below — the two early-return
+  // paths (no-workspace hides the box; empty-dir has nothing to scroll) legitimately
+  // reset. A plain scrollTop restore suffices here: expand/collapse insert/remove rows
+  // BELOW the clicked disclosure, so the clicked row keeps its offset from the top (no
+  // getBoundingClientRect anchor delta needed — that's only for prepend-above cases).
+  const prevScrollTop=box?box.scrollTop:0;
+  box.innerHTML='';
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
   // Show empty-state when no workspace is set or the directory is empty (#703)
@@ -17301,6 +17943,8 @@ function renderFileTree(){
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
+  // #5657: restore the pre-wipe scroll position now that the tree is tall again.
+  if(box) box.scrollTop=prevScrollTop;
 }
 
 let _wsActiveDragPath=null;

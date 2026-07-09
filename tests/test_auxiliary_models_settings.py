@@ -122,16 +122,19 @@ class TestAuxiliaryModelsJS:
         assert helper_idx >= 0
         helper_body = PANELS_JS[helper_idx:helper_idx + 1300]
         assert "_mainModelSupportsServiceTier" in PANELS_JS
-        assert "rawModel.includes('/')" in helper_body
-        assert "rawModel.slice(0,slash)!=='openai'" in helper_body
-        assert "bareModel.includes('codex')" in helper_body
-        assert "bareModel.startsWith('gpt-')" in helper_body
-        assert "bareModel.startsWith('o4')" in helper_body
+        assert "selectedOpt.dataset.fast" in helper_body
+        assert "return cfg&&cfg.supports_fast_tier===true" in helper_body
+        assert "return fastSupport==='1'||fastSupport==='true'" in helper_body
+        assert "provider!=='openai'&&provider!=='openai-api'&&provider!=='openai-codex')" in helper_body
+        assert "provider==='openai-codex') return false" not in helper_body
         assert "auxAdvancedServiceTier" in modal_body
         assert "isMain&&_mainModelSupportsServiceTier(cfg)" in modal_body
         assert "settings_main_advanced_service_tier" in modal_body
         assert "settings_main_advanced_service_tier_default" in modal_body
         assert "settings_main_advanced_service_tier_priority" in modal_body
+        assert "m.supports_fast_tier" in PANELS_JS
+        assert "opt.dataset.fast='1'" in PANELS_JS
+        assert "opt.dataset.fast='0'" in PANELS_JS
 
     def test_main_advanced_save_omits_unsupported_timing_keys(self):
         """Saving main-model options must not send blank timing keys that backend treats as clears."""
@@ -330,7 +333,7 @@ class TestAuxiliaryModelsI18n:
         """Count of each key should equal the number of locales (12 with Turkish)."""
         for key in self.REQUIRED_KEYS:
             count = I18N_JS.count(f"{key}:")
-            assert count == 14, (
+            assert count == 15, (
                 f"i18n key '{key}' found {count} times — expected 14 (one per locale)"
             )
 

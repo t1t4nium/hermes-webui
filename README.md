@@ -3,9 +3,7 @@
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
 Hermes WebUI is a lightweight, dark-themed web app interface in your browser for [Hermes Agent](https://hermes-agent.nousresearch.com/).
-Full parity with the CLI experience - everything you can do from a terminal,
-you can do from this UI. No build step, no framework, no bundler. Just Python
-and vanilla JS.
+Full parity with the CLI experience - everything you can do from a terminal, you can do from this UI. No build step, no framework, no bundler. Just Python and vanilla JS.
 
 Layout: three-panel. Left sidebar for sessions and navigation, center for chat,
 right for workspace file browsing. Model, profile, and workspace controls live in
@@ -13,7 +11,9 @@ the **composer footer** — always visible while composing. A circular context r
 shows token usage at a glance. All settings and session tools are in the
 **Hermes Control Center** (launcher at the sidebar bottom).
 
-<img width="2448" height="1748" alt="Hermes Web UI — three-panel layout" src="https://github.com/user-attachments/assets/6bf8af4c-209d-441e-8b92-6515d7a0c369" />
+Setup Hermes so you can access it natively on every device:
+
+<img width="1467" height="881" alt="image" src="https://github.com/user-attachments/assets/9a72cdf3-a5b4-45ed-a836-a715ce46287e" />
 
 <table>
   <tr>
@@ -46,6 +46,9 @@ This gives you nearly **1:1 parity with Hermes CLI from a convenient web UI** wh
 ---
 
 ## Contents
+
+[<img width="750" alt="image" src="https://github.com/user-attachments/assets/7e9544a7-ba47-4fc7-8142-1d9d16b17065" />
+](https://get-hermes.ai/setup/) 
 
 - [Why Hermes](#why-hermes) — what it is and how it compares
 - [Quick start](#quick-start) — clone + `bootstrap.py` / `start.sh` / `ctl.sh`
@@ -257,6 +260,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 ### Authentication and security
 - Optional password auth -- off by default, zero friction for localhost
 - Enable via `HERMES_WEBUI_PASSWORD` env var or Settings panel
+- Installed PWAs work best with WebUI's own password. Reverse proxies are supported, but proxy basic auth can block the service-worker update fetches an installed app needs and leave it on a blank screen after an update; see `docs/troubleshooting.md` for recovery steps.
 - Optional passkeys/WebAuthn -- register from Settings -> System after signing in with a password; the login page only shows passkey sign-in after at least one passkey exists
 - After registering at least one passkey, Settings -> System can remove the password and keep passkey-only sign-in enabled. Password auth remains the bootstrap/recovery path until you choose to go passwordless; passkeys are same-origin and stored locally in the WebUI state directory
 - Optional native OIDC login for WebUI sessions -- configure `webui_oidc.issuer`, `client_id`, `allow_claim`, and `allow_values` in `config.yaml`, or set the matching `HERMES_WEBUI_OIDC_*` environment variables. OIDC stays disabled until all four are present, and startup prints a warning if the config is partial.
@@ -639,24 +643,24 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly, absorbed into a batch release, or salvaged from a larger proposal — shapes the project, and we're grateful to everyone who has taken the time to contribute.
 
 <!-- BEGIN GENERATED CONTRIBUTORS -->
-Over **304 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
+Over **326 contributors** have shipped code that landed in a release tag. The full, continuously-updated credit roll — including everyone with one or two PRs and the special-thanks roll for design and architectural work — lives in [`CONTRIBUTORS.md`](CONTRIBUTORS.md). A snapshot of the most prolific contributors:
 
 ### Top contributors (by PR count, including absorbed/batch-released work)
 
 | # | Contributor | PRs | First → latest release |
 |---|---|---:|---|
-| 1 | [@franksong2702](https://github.com/franksong2702) | 289 | `v0.49.3` → `v0.51.721` |
-| 2 | [@rodboev](https://github.com/rodboev) | 265 | `v0.51.223` → `v0.51.731` |
+| 1 | [@rodboev](https://github.com/rodboev) | 336 | `v0.51.223` → `v0.51.893` |
+| 2 | [@franksong2702](https://github.com/franksong2702) | 301 | `v0.49.3` → `v0.51.893` |
 | 3 | [@Michaelyklam](https://github.com/Michaelyklam) | 157 | `v0.50.240` → `v0.51.198` |
-| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 116 | `v0.50.279` → `v0.51.519` |
-| 5 | [@bergeouss](https://github.com/bergeouss) | 80 | `v0.48.0` → `v0.51.527` |
+| 4 | [@ai-ag2026](https://github.com/ai-ag2026) | 121 | `v0.50.279` → `v0.51.835` |
+| 5 | [@bergeouss](https://github.com/bergeouss) | 80 | `v0.48.0` → `v0.51.703` |
 | 6 | [@AJV20](https://github.com/AJV20) | 57 | `v0.51.93` → `v0.51.346` |
 | 7 | [@dso2ng](https://github.com/dso2ng) | 43 | `v0.50.227` → `v0.51.578` |
-| 8 | [@Sanjays2402](https://github.com/Sanjays2402) | 27 | `v0.50.292` → `v0.51.484` |
-| 9 | [@starship-s](https://github.com/starship-s) | 27 | `v0.50.123` → `v0.51.638` |
-| 10 | [@Hinotoi-agent](https://github.com/Hinotoi-agent) | 23 | `v0.50.10` → `v0.51.522` |
+| 8 | [@starship-s](https://github.com/starship-s) | 28 | `v0.50.123` → `v0.51.763` |
+| 9 | [@Sanjays2402](https://github.com/Sanjays2402) | 27 | `v0.50.292` → `v0.51.484` |
+| 10 | [@allenliang2022](https://github.com/allenliang2022) | 24 | `v0.51.185` → `v0.51.869` |
 
-See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 304 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
+See [`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the full ranked list of all 326 contributors — the 3+ PR tables, the 1–2 PR roll, and the special-thanks notes for design and architectural contributions.
 <!-- END GENERATED CONTRIBUTORS -->
 
 ### Notable contributions

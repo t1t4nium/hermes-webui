@@ -1389,6 +1389,40 @@ def _agent_result_tool_limit_reached(result) -> bool:
     return False
 
 
+def _maybe_inject_max_iteration_summary_fallback(messages, result) -> list:
+    """Append the agent's graceful summary text as an assistant turn when one is missing.
+
+    When ``AIAgent`` exhausts its iteration budget, ``agent.handle_max_iterations``
+    always returns a non-empty ``final_response`` — either the model-generated
+    summary or a graceful fallback (e.g. ``"I reached the iteration limit and
+    couldn't generate a summary."``). Hermes Agent surfaces that string as the
+    final answer to the user; the WebUI, by contrast, reads only ``messages``,
+    so an empty summary (common with reasoning-only responses) left the user
+    with a bare ``tool_limit_reached`` error instead of any closure text.
+
+    When ``_tool_limit_reached`` is true and ``messages`` ends without a final
+    assistant answer, inject ``result['final_response']`` as a new assistant
+    turn so ``_mark_latest_assistant_tool_limit_status`` can attach the status
+    card in the normal flow and the user sees the same closure text as
+    hermes-agent. Returns the (possibly new) messages list; does nothing when
+    a usable assistant answer already exists or when ``result`` carries no
+    graceful fallback text.
+    """
+    if not isinstance(result, dict):
+        return list(messages or [])
+    fallback = result.get('final_response')
+    if not isinstance(fallback, str) or not fallback.strip():
+        return list(messages or [])
+    out = list(messages or [])
+    if not _session_lacks_final_assistant_answer(out):
+        return out
+    # Append a synthetic summary turn. Tag it so downstream consumers can
+    # distinguish it from model-emitted assistant turns if needed; mirrors the
+    # synthetic-scaffolding flag convention already used elsewhere (#5334).
+    out.append({"role": "assistant", "content": fallback, "_max_iteration_summary_fallback": True})
+    return out
+
+
 def _mark_latest_assistant_tool_limit_status(messages) -> bool:
     """Annotate the latest usable assistant final answer as limit-stopped."""
     for msg in reversed(list(messages or [])):
@@ -3991,6 +4025,10 @@ def _sanitize_messages_for_api(
                 # Orphaned tool result — skip to avoid 400 from strict providers.
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        # Drop empty tool_calls — strict providers (DeepSeek, newer OpenAI)
+        # reject tool_calls: [] with HTTP 400 even when no orphaned calls exist.
+        if 'tool_calls' in sanitized and not sanitized['tool_calls']:
+            del sanitized['tool_calls']
         # Provider-aware reasoning_content stripping from model-facing history.
         # Historical assistant reasoning_content is stripped only when the user
         # explicitly requests strip mode or auto mode identifies a local/generic
@@ -4102,6 +4140,8 @@ def _api_safe_message_positions(messages):
             if not tid or tid not in valid_tool_call_ids:
                 continue
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        if 'tool_calls' in sanitized and not sanitized['tool_calls']:
+            del sanitized['tool_calls']
         if is_recovered:
             sanitized['_recovered'] = True  # temporary marker — stripped before return
         if 'content' in sanitized:
@@ -4281,6 +4321,12 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
         if not isinstance(msg, dict):
             return None
         projected = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
+        # Mirror the empty-tool_calls drop applied by _api_safe_message_positions
+        # (#5737) so this projection matches the API-safe positions it's aligned
+        # against — otherwise a row stored with tool_calls: [] projects
+        # differently here than in prev_safe and loses its metadata carry-forward.
+        if 'tool_calls' in projected and not projected['tool_calls']:
+            del projected['tool_calls']
         if 'content' in projected:
             projected['content'] = _strip_oob_blocks(projected['content'])
         return projected
@@ -5926,6 +5972,13 @@ def _snapshot_and_append_partial_on_error(session, stream_id) -> dict | None:
     _snap_reasoning = None
     _snap_tool_calls = None
 
+    # The streaming thread mirrors these three buffers lock-free (GIL-atomic; see
+    # the STREAMS_LOCK contract note at on_token in the streaming loop). We take
+    # STREAMS_LOCK here to read atomically w.r.t. the worker's cleanup `finally`
+    # (which pops all three under STREAMS_LOCK) — NOT w.r.t. the writer, which
+    # holds no lock, so the three reads may still reflect slightly different
+    # points in time. That is acceptable: each individual read is complete (never
+    # torn) and a slightly-stale partial is reconciled by later journal/SSE events.
     with streams_lock:
         _snap_partial_text = partial_texts.get(stream_id, '')
         if not _snap_partial_text:
@@ -6665,12 +6718,18 @@ def _run_agent_streaming(
 
         return _usage
 
-    # Register this stream with the global streaming meter
-    meter().begin_session(stream_id)
-
     # Metering ticker — emits a metering event at 1 Hz while sessions are active.
     # When get_interval() returns >= 10.0 (no active sessions), the ticker exits
     # so no idle readings are emitted and the SSE consumer sees nothing.
+    #
+    # #4633/#2476: begin_session() and the ticker .start() are deferred into the
+    # outer `try` below so the outer `finally` (which pops STREAMS/CANCEL_FLAGS)
+    # always runs its paired end_session()/_metering_stop.set() teardown. A raise
+    # between here and that `try` would otherwise leak the _sessions[stream_id]
+    # entry — get_stats() only prunes sessions with first_token_ts > 0, so a
+    # zero-token turn (pre-flight cancel, setup raise) is never reclaimed and its
+    # count inflates the SSE `active` field. Deferring .start() until after `put`
+    # is defined also removes a latent start-before-put ordering window.
     _metering_stop = threading.Event()
 
     def _metering_ticker():
@@ -6686,7 +6745,6 @@ def _run_agent_streaming(
             put('metering', stats)
 
     _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
-    _metering_thread.start()
 
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
@@ -6763,6 +6821,11 @@ def _run_agent_streaming(
     _ckpt_thread = None
     _agent_lock = None
     try:
+        # Register this stream with the global streaming meter and start the 1 Hz
+        # metering ticker. Kept INSIDE the outer try so the outer `finally`'s
+        # end_session()/_metering_stop.set() teardown is always paired (#4633/#2476).
+        meter().begin_session(stream_id)
+        _metering_thread.start()
         # Bind THIS turn's session identity to the worker thread/context BEFORE
         # any agent work (so every mid-turn notify_on_complete background spawn
         # captures THIS session, not a concurrent turn's process-global env).
@@ -7155,7 +7218,28 @@ def _run_agent_streaming(
                 # first so the live Thinking stream is complete before/at the transition.
                 _flush_reasoning_buffer()
                 _token_sent = True
-                # Accumulate partial text so cancel_stream() can persist it (#893)
+                # Accumulate partial text so cancel_stream() can persist it (#893).
+                #
+                # STREAMS_LOCK contract for the three STREAM_* buffers (partial text,
+                # reasoning, live tool calls): the per-token hot path below mirrors
+                # into them WITHOUT holding STREAMS_LOCK, while snapshot readers hold
+                # STREAMS_LOCK (_snapshot_and_append_partial_on_error / cancel_stream).
+                # This is deliberate and safe for two reasons, NOT because `+=` is one
+                # bytecode (it is not — `d[k] += s` compiles to load/add/STORE_SUBSCR):
+                #  1. Single writer: only this streaming thread ever writes a given
+                #     stream_id's buffers, so there is no writer/writer race to tear.
+                #  2. Reader/writer atomicity under the GIL: `+=` builds a complete new
+                #     immutable str, then the final STORE_SUBSCR that binds it into the
+                #     dict is a single atomic bytecode; a concurrent reader's dict.get
+                #     therefore returns either the old or the new *complete* string
+                #     object (strings are immutable — never a half-built one). Same for
+                #     the atomic list.append / single-key dict writes on the other two.
+                # So a reader sees a complete-but-possibly-stale value, never a torn one.
+                # The snapshot is a best-effort partial that later journal/SSE events
+                # reconcile, so exact-latest is not required. Taking STREAMS_LOCK per
+                # token would add real contention against readers copying large buffers
+                # and would entangle the documented LOCK -> STREAMS_LOCK ordering — not
+                # worth it for a recoverable staleness window.
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += str(text)
                 put('token', {'text': text})
@@ -7188,6 +7272,7 @@ def _run_agent_streaming(
                 # Mirror full concatenation to shared dict so cancel_stream() can persist
                 # it (#1361 §A). Cancel only creates one partial message, so the flat
                 # concatenation is correct there.
+                # Lock-free GIL-atomic mirror — see the STREAMS_LOCK contract in on_token.
                 if stream_id in STREAM_REASONING_TEXT:
                     STREAM_REASONING_TEXT[stream_id] += reasoning_delta
                 # Accumulate into a coalescing buffer so every delta reaches the
@@ -7312,6 +7397,7 @@ def _run_agent_streaming(
                             _reasoning_segments.get(_current_reasoning_idx, '') + reason_delta
                         )
                         # Mirror full concatenation to shared dict (#1361 §A)
+                        # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                         if stream_id in STREAM_REASONING_TEXT:
                             STREAM_REASONING_TEXT[stream_id] += reason_delta
                         put('reasoning', {'text': reason_delta})
@@ -7344,6 +7430,7 @@ def _run_agent_streaming(
                         'args': args if isinstance(args, dict) else {},
                     })
                     # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
+                    # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                     if stream_id in STREAM_LIVE_TOOL_CALLS:
                         STREAM_LIVE_TOOL_CALLS[stream_id].append({
                             'name': name,
@@ -7472,6 +7559,7 @@ def _run_agent_streaming(
                             'tid': tool_call_id,
                         })
                         # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
+                        # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
                         if stream_id in STREAM_LIVE_TOOL_CALLS:
                             STREAM_LIVE_TOOL_CALLS[stream_id].append({
                                 'name': name,
@@ -8239,6 +8327,24 @@ def _run_agent_streaming(
                         _result_messages,
                         enabled=_tool_limit_reached,
                     )
+                    # #5494 — parity with hermes-agent's handle_max_iterations() return
+                    # value. When the agent produced no usable summary assistant
+                    # message but result['final_response'] carries a graceful fallback
+                    # string, inject it as a final assistant turn so the user sees
+                    # closure text instead of a bare tool_limit_reached error. Apply
+                    # the synthesis to result['messages'] AND _result_messages so the
+                    # downstream _all_result_messages checks (silent-failure detection
+                    # at api/streaming.py:_assistant_reply_added_after_current_turn)
+                    # see the fallback too. `finalize_turn` in the agent always returns
+                    # messages as a list, but we write back unconditionally so the
+                    # contract is "if we built a result-messages list, the silent-failure
+                    # classifier reads the augmented version."
+                    if _tool_limit_reached:
+                        _result_messages = _maybe_inject_max_iteration_summary_fallback(
+                            _result_messages, result
+                        )
+                        if isinstance(result, dict):
+                            result = {**result, 'messages': _result_messages}
                     if cancel_event.is_set():
                         _finalize_cancelled_turn(s, ephemeral=False)
                         try:
@@ -9223,6 +9329,9 @@ def _run_agent_streaming(
                             model=model,
                             title=s.title,
                             message_count=len(s.messages),
+                            cache_read_tokens=s.cache_read_tokens or 0,
+                            cache_write_tokens=s.cache_write_tokens or 0,
+                            api_call_count=getattr(agent, 'session_api_calls', None),
                             # #2762: pass the session's profile explicitly so the
                             # background-thread state.db lookup doesn't fall
                             # through to the process-global active profile and
@@ -9798,6 +9907,23 @@ def _run_agent_streaming(
             _error_payload['old_session_id'] = session_id
         put('apperror', _error_payload)
     finally:
+        # #4633/#2476: symmetric metering teardown. begin_session() (top of the
+        # outer try) had no paired end_session(), so zero-token turns leaked a
+        # _sessions[stream_id] entry that get_stats() pruning never reclaims (its
+        # criterion requires first_token_ts > 0). end_session() is idempotent —
+        # it just pops _sessions[stream_id]; the metering payload is unchanged.
+        # _metering_stop.set() deterministically stops the ticker (the inner
+        # finally also sets it on the normal path; setting twice is harmless).
+        try:
+            # 0: end_session() currently ignores final_output_tokens — it only
+            # pops _sessions[stream_id]. If it is ever extended to consume the
+            # count (e.g. persisting final output tokens to a billing ledger),
+            # this teardown caller will need to supply the real total; the outer
+            # finally doesn't have easy access to it today.
+            meter().end_session(stream_id, 0)
+        except Exception:
+            logger.debug("Failed to end metering session for stream %s", stream_id, exc_info=True)
+        _metering_stop.set()
         # Stop the periodic checkpoint thread before the final recovery path.
         # The checkpoint thread also uses the per-session lock; joining it first
         # avoids contending with checkpoint writes during stale-pending repair.
