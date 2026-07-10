@@ -20,7 +20,9 @@ refactor cannot silently reintroduce the truncating plain-write.
 
 import errno
 import os
+import shutil
 import stat
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -79,6 +81,108 @@ def test_atomic_write_preserves_existing_permissions(tmp_path: Path) -> None:
     os.chmod(target, 0o2664)
     _atomic_write_text(target, "model:\n  default: newest\n")
     assert stat.S_IMODE(os.stat(target).st_mode) == 0o2664
+
+
+@pytest.mark.skipif(
+    not all(hasattr(os, name) for name in ("getxattr", "listxattr", "setxattr")),
+    reason="extended attributes are unavailable on this platform",
+)
+def test_atomic_write_preserves_existing_user_xattr(tmp_path: Path) -> None:
+    """Replacing config contents must not discard administrator metadata."""
+    target = tmp_path / "config.yaml"
+    target.write_text("old: true\n", encoding="utf-8")
+    attribute = "user.hermes_review"
+    value = b"preserve-me"
+    try:
+        os.setxattr(target, attribute, value)
+    except OSError as exc:
+        if exc.errno in {errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP}:
+            pytest.skip("test filesystem does not support user extended attributes")
+        raise
+
+    _atomic_write_text(target, "new: true\n")
+
+    assert attribute in os.listxattr(target)
+    assert os.getxattr(target, attribute) == value
+
+
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="xattr probe unavailable")
+def test_unsupported_xattr_probe_keeps_atomic_replace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Filesystems without xattr support retain the normal atomic path."""
+    target = tmp_path / "config.yaml"
+    target.write_text("old: true\n", encoding="utf-8")
+    replace_calls = 0
+    real_replace = os.replace
+
+    def _unsupported_xattrs(_path) -> list[str]:
+        raise OSError(errno.ENOTSUP, "xattrs unsupported")
+
+    def _recording_replace(src, dst) -> None:
+        nonlocal replace_calls
+        replace_calls += 1
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "listxattr", _unsupported_xattrs)
+    monkeypatch.setattr(os, "replace", _recording_replace)
+
+    _atomic_write_text(target, "new: true\n")
+
+    assert target.read_text(encoding="utf-8") == "new: true\n"
+    assert replace_calls == 1
+
+
+@pytest.mark.skipif(not hasattr(os, "listxattr"), reason="xattr probe unavailable")
+def test_xattr_probe_failure_does_not_silently_drop_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Unexpected metadata-read failures abort before touching the old file."""
+    target = tmp_path / "config.yaml"
+    target.write_text("old: true\n", encoding="utf-8")
+
+    def _denied_xattrs(_path) -> list[str]:
+        raise PermissionError("xattr access denied")
+
+    monkeypatch.setattr(os, "listxattr", _denied_xattrs)
+
+    with pytest.raises(PermissionError, match="xattr access denied"):
+        _atomic_write_text(target, "new: true\n")
+
+    assert target.read_text(encoding="utf-8") == "old: true\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["config.yaml"]
+
+
+@pytest.mark.skipif(
+    not shutil.which("getfacl") or not shutil.which("setfacl"),
+    reason="getfacl/setfacl are unavailable",
+)
+def test_atomic_write_preserves_existing_posix_acl(tmp_path: Path) -> None:
+    """POSIX access ACLs, commonly stored as xattrs, survive a rewrite."""
+    target = tmp_path / "config.yaml"
+    target.write_text("old: true\n", encoding="utf-8")
+    subprocess.run(
+        ["setfacl", "-m", "u:12345:r--", str(target)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    expected_acl = subprocess.run(
+        ["getfacl", "-cp", str(target)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    _atomic_write_text(target, "new: true\n")
+
+    actual_acl = subprocess.run(
+        ["getfacl", "-cp", str(target)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert actual_acl == expected_acl
 
 
 @pytest.mark.skipif(not hasattr(os, "chown"), reason="POSIX ownership semantics")

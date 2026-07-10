@@ -61,6 +61,24 @@ def _fsync_directory(directory: Path) -> None:
         os.close(fd)
 
 
+def _has_extended_attributes(path: Path) -> bool:
+    """Return whether *path* has xattrs that an inode replacement would discard."""
+    listxattr = getattr(os, "listxattr", None)
+    if listxattr is None:
+        return False
+    try:
+        return bool(listxattr(path))
+    except OSError as exc:
+        unsupported_errnos = {
+            errno.ENOSYS,
+            errno.ENOTSUP,
+            getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+        }
+        if exc.errno in unsupported_errnos:
+            return False
+        raise
+
+
 def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
     """Atomically replace *path* with *text*.
 
@@ -96,13 +114,14 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     settings at all. When temp creation is denied, or the original uid/gid
     cannot be transferred to the temp inode, we fall back to a guarded
     descriptor write only if the target is still the regular-file inode
-    inspected above. Hard-linked files use that same path because replacing
-    their directory entry would break ``Path.write_text`` compatibility. These
-    in-place writes are serialized across process-local WebUI writers. They give
-    up crash-atomicity (and raw concurrent readers may observe the write in
-    progress) only where atomic replace with preserved semantics is impossible.
-    Other ``PermissionError``s still propagate. Successful renames fsync the
-    parent directory where supported.
+    inspected above. Hard-linked files and files with extended attributes use
+    that same path because replacing their directory entry would respectively
+    break ``Path.write_text`` compatibility or discard metadata such as POSIX
+    ACLs. These in-place writes are serialized across process-local WebUI
+    writers. They give up crash-atomicity (and raw concurrent readers may
+    observe the write in progress) only where atomic replace with preserved
+    semantics is impossible. Other ``PermissionError``s still propagate.
+    Successful renames fsync the parent directory where supported.
 
     The caller is responsible for ensuring ``path.parent`` exists.
     """
@@ -145,7 +164,11 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                 if owns_fallback_fd:
                     os.close(fallback_fd)
 
-    if existing_stat is not None and existing_stat.st_nlink > 1:
+    if (
+        existing_stat is not None
+        and stat.S_ISREG(existing_stat.st_mode)
+        and (existing_stat.st_nlink > 1 or _has_extended_attributes(write_path))
+    ):
         _write_in_place()
         return
 
