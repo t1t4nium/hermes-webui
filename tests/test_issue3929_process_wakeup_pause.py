@@ -1003,6 +1003,130 @@ def test_process_wakeup_pause_revalidation_uses_session_profile_not_default(tmp_
     assert profiles.get_active_profile_name() == "default"
 
 
+@pytest.mark.parametrize(
+    ("recovered_status", "recovered_reset_at"),
+    [
+        ("ok", None),
+        ("exhausted", "2000-01-01T00:00:00Z"),
+    ],
+)
+def test_process_wakeup_pause_revalidates_named_profile_sanitized_env_pool_recovery(
+    tmp_path,
+    monkeypatch,
+    recovered_status,
+    recovered_reset_at,
+):
+    base_home = tmp_path / "hermes-home"
+    profile_home = base_home / "profiles" / "work"
+    profile_home.mkdir(parents=True)
+    api_key = "sk-or-profile-recovered"
+    (profile_home / ".env").write_text(f"OPENROUTER_API_KEY={api_key}\n", encoding="utf-8")
+    auth_json = profile_home / "auth.json"
+    secret_fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+
+    def _write_pool_entry(status, reset_at):
+        entry = {
+            "id": "openrouter-env",
+            "label": "OpenRouter env key",
+            "source": "env",
+            "auth_type": "api_key",
+            "secret_fingerprint": f"sha256:{secret_fingerprint}",
+            "last_status": status,
+            "last_status_at": "2026-07-10T00:00:00Z",
+            "last_error_code": "429",
+        }
+        if reset_at is not None:
+            entry["last_error_reset_at"] = reset_at
+        auth_json.write_text(
+            json.dumps({"credential_pool": {"openrouter": [entry]}}),
+            encoding="utf-8",
+        )
+
+    fake_auth_module = types.ModuleType("hermes_cli.auth")
+
+    def _read_credential_pool(provider_id):
+        raw = json.loads(config._get_auth_store_path().read_text(encoding="utf-8"))
+        return list((raw.get("credential_pool") or {}).get(provider_id, []))
+
+    fake_auth_module.read_credential_pool = _read_credential_pool
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth_module)
+    fake_hermes_cli = sys.modules.get("hermes_cli")
+    if fake_hermes_cli is not None:
+        fake_hermes_cli.auth = fake_auth_module
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", base_home)
+    monkeypatch.setattr(profiles, "_is_isolated_profile_mode", lambda: False)
+    profiles.clear_request_profile()
+
+    _write_pool_entry("exhausted", "2999-01-01T00:00:00Z")
+    session = Session(
+        session_id=f"wakeup_pause_named_profile_sanitized_env_{recovered_status}",
+        workspace=str(tmp_path),
+        model="test-model",
+        model_provider="openrouter",
+        profile="work",
+    )
+    pause = models.record_process_wakeup_provider_unavailable_pause(
+        session,
+        classification="credential_pool_empty",
+        model="test-model",
+        provider="openrouter",
+    )
+    assert pause is not None
+    paused_fingerprint = pause["credential_state_fingerprint"]
+    session.save()
+    models.SESSIONS[session.session_id] = session
+
+    _write_pool_entry(recovered_status, recovered_reset_at)
+    assert models.process_wakeup_credential_state_fingerprint(session) == paused_fingerprint
+
+    captured = {}
+
+    def _fake_start_run(s, **kwargs):
+        captured["source"] = kwargs.get("source")
+        captured["model"] = kwargs.get("model")
+        captured["model_provider"] = kwargs.get("model_provider")
+        return {
+            "stream_id": f"stream-named-profile-recovered-{recovered_status}",
+            "session_id": s.session_id,
+            "_status": 200,
+        }
+
+    _patch_process_wakeup_route(
+        monkeypatch,
+        tmp_path,
+        model="test-model",
+        provider="openrouter",
+    )
+    monkeypatch.setattr(
+        routes,
+        "provider_has_process_wakeup_recovery_credential",
+        providers.provider_has_process_wakeup_recovery_credential,
+    )
+    monkeypatch.setattr(routes, "_start_run", _fake_start_run)
+
+    try:
+        response = routes.start_session_turn(
+            session.session_id,
+            "[IMPORTANT: Background process completed after named profile credential recovery.]",
+            source="process_wakeup",
+        )
+    finally:
+        profiles.clear_request_profile()
+
+    assert response["_status"] == 200
+    assert response["stream_id"] == f"stream-named-profile-recovered-{recovered_status}"
+    assert captured == {
+        "source": "process_wakeup",
+        "model": "test-model",
+        "model_provider": "openrouter",
+    }
+    saved = Session.load(session.session_id)
+    assert saved is not None
+    assert saved.process_wakeup_pause == {}
+    assert profiles.get_active_profile_name() == "default"
+
+
 def test_process_wakeup_pause_suppresses_at_provider_model_session(tmp_path, monkeypatch):
     session = Session(
         session_id="wakeup_pause_at_model",

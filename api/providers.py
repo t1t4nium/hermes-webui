@@ -1394,10 +1394,13 @@ def provider_has_process_wakeup_recovery_credential(provider_id: str, *, refresh
         return False
     has_unusable_pool_entry = False
     for entry in _pool_entry_payloads(provider):
+        entry_fingerprint = _entry_secret_fingerprint(entry)
         if not _pool_entry_currently_unusable(entry):
+            if entry_fingerprint == configured_fingerprint:
+                return True
             continue
         has_unusable_pool_entry = True
-        if _entry_secret_fingerprint(entry) == configured_fingerprint:
+        if entry_fingerprint == configured_fingerprint:
             return False
     return has_unusable_pool_entry
 
