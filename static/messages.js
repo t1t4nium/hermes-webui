@@ -1545,6 +1545,25 @@ async function send(){
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      // ── Skill commands: `/skill-name [args]` resolved server-side ──
+      if(!_bundleCmd && !_agentCmd && _parsedCmd && typeof loadSkillCommands==='function'){
+        const _skillCache = await loadSkillCommands();
+        if(Array.isArray(_skillCache) && _skillCache.find(s => s.name === _parsedCmd.name)){
+          try {
+            const _resolved = typeof resolveSkillCommand==='function'
+              ? await resolveSkillCommand(text)
+              : null;
+            const _skillMessage = String(_resolved&&_resolved.message||'').trim();
+            if(_skillMessage){
+              _slashDisplayTextOverride = text;
+              text = _skillMessage;
+            }
+          } catch(_e){
+            // Silently fall through — send the raw text, the agent still
+            // sees /skill-name in its input and may call skill_view itself.
+          }
+        }
+      }
     }
   }
   if(!S.session){await newSession();await renderSessionList();}

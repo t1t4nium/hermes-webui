@@ -204,6 +204,45 @@ def resolve_bundle_command(command: str) -> dict[str, Any]:
     }
 
 
+def resolve_skill_command(command: str) -> dict[str, Any]:
+    """Expand a single skill slash command into the backend invocation payload."""
+    skill_name, user_instruction = _parse_slash_command(command)
+
+    try:
+        from agent.skill_commands import (
+            build_skill_invocation_message,
+            resolve_skill_command_key,
+        )
+    except ImportError as exc:
+        logger.warning("Skill command runtime unavailable", exc_info=True)
+        raise RuntimeError("Skill command runtime unavailable") from exc
+
+    try:
+        with _bundle_profile_context("/api/commands/skills/resolve"):
+            cmd_key = resolve_skill_command_key(skill_name)
+            if cmd_key is None:
+                raise KeyError(skill_name)
+            message = build_skill_invocation_message(cmd_key, user_instruction)
+    except (KeyError, ValueError, RuntimeError):
+        raise
+    except Exception as exc:
+        logger.warning("Failed to resolve skill command", exc_info=True)
+        raise RuntimeError("Skill command unavailable") from exc
+
+    if not message:
+        raise RuntimeError("Skill command returned no invocation text")
+
+    resolved_message = str(message).strip()
+    if not resolved_message:
+        raise RuntimeError("Skill command returned no invocation text")
+
+    return {
+        "name": cmd_key.lstrip("/"),
+        "source": "skill",
+        "message": resolved_message,
+    }
+
+
 def execute_agent_command(command: str) -> str:
     """Execute a narrow allowlist of agent-side runtime commands."""
 

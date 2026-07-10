@@ -451,6 +451,15 @@ async function resolveBundleCommand(text,_meta){
   });
 }
 
+async function resolveSkillCommand(text){
+  const command=String(text||'').trim();
+  if(!command) throw new Error('command is required');
+  return api('/api/commands/skills/resolve',{
+    method:'POST',
+    body:JSON.stringify({command})
+  });
+}
+
 function _activeSlashCommandOffset(text){
   // Find the offset of the slash that begins the active command token.
   // A command token starts with / at the beginning of the line or after
