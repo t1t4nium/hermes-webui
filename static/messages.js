@@ -1547,9 +1547,9 @@ async function send(){
       }
       // ── Skill commands: `/skill-name [args]` resolved server-side ──
       if(!_bundleCmd && !_agentCmd && _parsedCmd && typeof loadSkillCommands==='function'){
-        const _skillCache = await loadSkillCommands();
-        if(Array.isArray(_skillCache) && _skillCache.find(s => s.name === _parsedCmd.name)){
-          try {
+        try {
+          const _skillCache = await loadSkillCommands();
+          if(Array.isArray(_skillCache) && _skillCache.find(s => s.name === _parsedCmd.name)){
             const _resolved = typeof resolveSkillCommand==='function'
               ? await resolveSkillCommand(text)
               : null;
@@ -1558,10 +1558,10 @@ async function send(){
               _slashDisplayTextOverride = text;
               text = _skillMessage;
             }
-          } catch(_e){
-            // Silently fall through — send the raw text, the agent still
-            // sees /skill-name in its input and may call skill_view itself.
           }
+        } catch(_e){
+          // Silently fall through — send the raw text, the agent still
+          // sees /skill-name in its input and may call skill_view itself.
         }
       }
     }
