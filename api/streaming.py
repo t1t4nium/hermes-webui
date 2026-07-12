@@ -6531,6 +6531,7 @@ def _run_agent_streaming(
     model_provider=None,
     goal_related=False,
     moa_config=None,
+    expanded_msg_text="",
 ):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -8346,7 +8347,7 @@ def _run_agent_streaming(
             _ckpt_thread.start()
 
             _process_notifications = _drain_webui_process_notifications(session_id)
-            _agent_msg_text = msg_text
+            _agent_msg_text = expanded_msg_text or msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
@@ -8370,6 +8371,12 @@ def _run_agent_streaming(
             if moa_config is not None:
                 _run_conversation_kwargs["moa_config"] = moa_config
             result = agent.run_conversation(**_run_conversation_kwargs)
+            # Apply persist override to result messages for the transcript.
+            # The agent's internal _apply_persist_user_message_override is only
+            # called in tests — the live messages list returned by
+            # run_conversation still has the expanded user_message content.
+            # Patch it here so the merge function below gets the RAW text.
+            agent._apply_persist_user_message_override(result.get("messages", []))
             # #4729: the run is done — flush any reasoning tail still in the coalescing
             # buffer (the agent never calls reasoning_callback(None), and a turn can end on
             # reasoning with no trailing token/tool boundary to trigger a flush) so the last

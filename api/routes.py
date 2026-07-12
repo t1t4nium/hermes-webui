@@ -20081,6 +20081,7 @@ def _start_chat_stream_for_session(
     s,
     *,
     msg: str,
+    expanded_msg="",
     attachments=None,
     workspace: str,
     model: str,
@@ -20213,6 +20214,8 @@ def _start_chat_stream_for_session(
     backend_is_gateway = webui_gateway_chat_enabled(get_config())
     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    if expanded_msg:
+        worker_kwargs["expanded_msg_text"] = expanded_msg
     if moa_config and not backend_is_gateway:
         worker_kwargs["moa_config"] = moa_config
     thr = threading.Thread(
@@ -20301,6 +20304,7 @@ def _start_run(
     route: str,
     diag=None,
     moa_config=None,
+    expanded_msg="",
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -20333,6 +20337,7 @@ def _start_run(
             return _start_chat_stream_for_session(
                 s,
                 msg=request.message,
+                expanded_msg=expanded_msg,
                 attachments=request.attachments,
                 workspace=request.workspace or workspace,
                 model=request.model or model,
@@ -20373,6 +20378,7 @@ def _start_run(
     return _start_chat_stream_for_session(
         s,
         msg=msg,
+        expanded_msg=expanded_msg,
         attachments=attachments,
         workspace=workspace,
         model=model,
@@ -20900,6 +20906,7 @@ def _handle_chat_start(handler, body, diag=None):
                 return bad(handler, "Session not found", 404)
         diag.stage("normalize_message") if diag else None
         msg = str(body.get("message", "")).strip()
+        expanded_msg = str(body.get("expanded_message", "")).strip()
         if not msg:
             return bad(handler, "message is required")
         diag.stage("normalize_attachments") if diag else None
@@ -20965,6 +20972,7 @@ def _handle_chat_start(handler, body, diag=None):
         # — Q-2979-A2 / Copilot discussion_r3305864087/r3305864173).
         start_run_kwargs = {
             "msg": msg,
+            "expanded_msg": expanded_msg,
             "attachments": attachments,
             "workspace": workspace,
             "model": model,

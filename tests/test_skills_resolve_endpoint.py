@@ -65,7 +65,8 @@ def test_skill_dispatch_checks_loadSkillCommands():
     assert "loadSkillCommands()" in body
     assert "_parsedCmd.name" in body
     assert "_slashDisplayTextOverride = text" in body
-    assert "text = _skillMessage" in body
+    assert "_pendingExpandedMessage = _skillMessage" in body
+    # text stays RAW — expanded body is sent via expanded_message field
 
 
 def test_skill_dispatch_skips_when_bundle_or_agent_cmd_matched():
@@ -84,6 +85,15 @@ def test_skill_dispatch_falls_through_silently_on_error():
     body = MESSAGES_JS[idx:]
     assert "} catch(_e){" in body
     assert "Silently fall through" in body
+
+
+def test_skill_dispatch_sends_expanded_message():
+    """The POST body must include expanded_message when a skill is resolved,
+    and the module-level var must exist and be consumed."""
+    assert "let _pendingExpandedMessage=null;" in MESSAGES_JS
+    assert "expanded_message:_pendingExpandedMessage||undefined" in MESSAGES_JS
+    assert "_pendingExpandedMessage=null;" in MESSAGES_JS
+    # After POST, the var is cleared for the next send
 
 
 # ── Static source-code assertions (Python backend) ─────────────────────────
@@ -289,3 +299,39 @@ def test_resolve_skill_command_preserves_leading_slash(monkeypatch):
 
     assert seen_slash["build"][0] == "/llm-wiki"
     assert seen_no_slash["build"][0] == "/llm-wiki"
+
+
+# ── Static source-code assertions (streaming.py — persist/display split) ─────
+
+
+STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+
+
+def test_persist_override_called_after_run_conversation():
+    """agent._apply_persist_user_message_override must be called on result
+    messages right after run_conversation, so the merge function below sees
+    the RAW text instead of the expanded user_message content."""
+    run_idx = STREAMING_PY.index("agent.run_conversation(**_run_conversation_kwargs)")
+    block = STREAMING_PY[run_idx:run_idx + 800]
+    assert "agent._apply_persist_user_message_override" in block
+    assert "result.get(\"messages\", [])" in block
+    # The override must appear BEFORE any merge/save operation on the result
+    merge_idx = STREAMING_PY.index("_merge_display_messages_after_agent_result", run_idx)
+    apply_idx = block.index("_apply_persist_user_message_override")
+    assert apply_idx < (merge_idx - run_idx), (
+        "persist override must run before the merge function reads result_messages"
+    )
+
+
+def test_persist_user_message_uses_raw_not_expanded():
+    """persist_user_message must be msg_text (the RAW command), not the
+    expanded _agent_msg_text — the split guarantees the transcript shows the
+    original /<skill> while the model sees the resolved skill body."""
+    # The main path: persist_user_message=msg_text (raw)
+    kwarg_block = STREAMING_PY[STREAMING_PY.index("_run_conversation_kwargs"):]
+    kwarg_block = kwarg_block[:kwarg_block.index("result = agent.run_conversation")]
+    assert "persist_user_message=msg_text" in kwarg_block
+    assert "persist_user_message=_agent_msg_text" not in kwarg_block
+    assert "persist_user_message=expanded_msg_text" not in kwarg_block
+    # Also verify _agent_msg_text uses expanded for the model
+    assert "_agent_msg_text = expanded_msg_text or msg_text" in STREAMING_PY

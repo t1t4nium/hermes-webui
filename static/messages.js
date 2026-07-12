@@ -1417,6 +1417,7 @@ async function send(){
   }
   let _slashDisplayTextOverride=null;
   let _pendingMoaConfig=null;
+  let _pendingExpandedMessage=null;
   // Slash command intercept -- local commands handled without agent round-trip.
   // We push the user message BEFORE running the handler for echo-worthy
   // commands so chat order is correct: some handlers (e.g. cmdHelp) push
@@ -1556,7 +1557,18 @@ async function send(){
             const _skillMessage = String(_resolved&&_resolved.message||'').trim();
             if(_skillMessage){
               _slashDisplayTextOverride = text;
-              text = _skillMessage;
+              // Condensed display: banner + instruction (matching CLI/TUI behavior)
+              const _lines = _skillMessage.split('\n');
+              const _banner = _lines[0];
+              const _instrIdx = _skillMessage.lastIndexOf(
+                'The user has provided the following instruction'
+              );
+              const _instruction = _instrIdx >= 0
+                ? _skillMessage.slice(_instrIdx)
+                : '';
+              text = _banner + (_instruction ? '\n\n' + _instruction : '');
+              // Full expanded for the model via expanded_message field
+              _pendingExpandedMessage = _skillMessage;
             }
           }
         } catch(_e){
@@ -1729,6 +1741,7 @@ async function send(){
     explicitPickForPostStart=_explicitPick;
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
+      expanded_message:_pendingExpandedMessage||undefined,
       // S.session.model remains authoritative; the helper only resolves a
       // matching provider fallback for the same outgoing model.
       model:_modelState.model,workspace:S.session.workspace,
@@ -1739,6 +1752,7 @@ async function send(){
       moa_config:_pendingMoaConfig?true:undefined
     })});
     _pendingMoaConfig=null;
+    _pendingExpandedMessage=null;
     postStartData = startData;
   }catch(e){
     const errMsg=String((e&&e.message)||'');
