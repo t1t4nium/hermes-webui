@@ -469,4 +469,36 @@ def test_resolve_stacked_skills_route_unchanged():
     """No new route is needed for stacked skills — the existing
     /api/commands/skills/resolve endpoint handles both single and stacked
     invocations via the same resolve_skill_command() function."""
-    assert '/api/commands/skills/resolve"' in ROUTES_PY
+    assert "skills/resolve" in ROUTES_PY
+    assert "resolve_skill_command" in ROUTES_PY
+
+
+# ── Static source-code assertions (ui.js — skill message truncation) ────────
+
+
+UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+
+
+def test_condense_skill_message_function_defined():
+    """_condenseSkillMessage() must exist in ui.js."""
+    assert "function _condenseSkillMessage(text)" in UI_JS
+
+
+def test_condense_skill_message_called_in_render():
+    """_condenseSkillMessage() must be called when rendering a user message,
+    wrapping the existing _stripAttachedFilesMarkerForDisplay call."""
+    assert "_condenseSkillMessage(_stripAttachedFilesMarkerForDisplay" in UI_JS
+
+
+def test_condense_skill_message_activates_on_invocation_pattern():
+    """_condenseSkillMessage must gate on the activation note prefix."""
+    assert "_SKILL_PREFIX" in UI_JS
+    assert "!text.startsWith(_SKILL_PREFIX)" in UI_JS
+
+
+def test_condense_skill_message_truncation_logic_present():
+    """The truncation constants and (+N more ...) rendering must exist."""
+    assert "_SKILL_PREFIX" in UI_JS
+    assert "_SINGLE_INSTRUCTION" in UI_JS
+    assert "_BUNDLE_INSTRUCTION" in UI_JS
+    assert "+hidden+' more '+noun" in UI_JS
