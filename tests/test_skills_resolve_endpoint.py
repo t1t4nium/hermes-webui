@@ -42,16 +42,18 @@ def _install_fake_skill_commands(monkeypatch, *, resolver=None, builder=None,
 
 def test_resolve_skill_command_helper_defined_in_commands_js():
     """resolveSkillCommand() must be present in commands.js."""
-    assert "async function resolveSkillCommand(text)" in COMMANDS_JS
+    assert "async function resolveSkillCommand(text, sessionId)" in COMMANDS_JS
     assert "api('/api/commands/skills/resolve'" in COMMANDS_JS
 
 
 def test_resolve_skill_command_uses_post_with_command_body():
-    """resolveSkillCommand() must POST a JSON body with a 'command' field."""
-    idx = COMMANDS_JS.index("async function resolveSkillCommand(text)")
+    """resolveSkillCommand() must POST a JSON body with a 'command' field
+    and optionally a 'session_id' field."""
+    idx = COMMANDS_JS.index("async function resolveSkillCommand(text, sessionId)")
     body = COMMANDS_JS[idx:]
     assert "method:'POST'" in body
-    assert "body:JSON.stringify({command})" in body
+    assert "body:JSON.stringify(body)" in body
+    assert "body.session_id=sessionId" in body
     assert "throw new Error('command is required')" in body
 
 
@@ -93,18 +95,26 @@ def test_skill_dispatch_falls_through_silently_on_error():
     assert "Silently fall through" in body
 
 
+def test_skill_dispatch_passes_session_id():
+    """The skill intercept must pass S.session.session_id to
+    resolveSkillCommand()."""
+    idx = MESSAGES_JS.find("// ── Skill commands:")
+    body = MESSAGES_JS[idx:]
+    assert "resolveSkillCommand(text, S.session && S.session.session_id)" in body
+
+
 # ── Static source-code assertions (Python backend) ─────────────────────────
 
 
 def test_skills_resolve_route_wired():
     """POST /api/commands/skills/resolve must be registered in routes.py."""
     assert '/api/commands/skills/resolve"' in ROUTES_PY
-    assert "resolve_skill_command(command)" in ROUTES_PY
+    assert "resolve_skill_command(command, session_id=session_id)" in ROUTES_PY
 
 
 def test_resolve_skill_command_function_defined():
     """resolve_skill_command() must be defined in api/commands.py."""
-    assert "def resolve_skill_command(command: str) -> dict[str, Any]:" in COMMANDS_PY
+    assert "def resolve_skill_command(command: str, session_id: str | None = None) -> dict[str, Any]:" in COMMANDS_PY
     assert "build_skill_invocation_message" in COMMANDS_PY
 
 
@@ -120,6 +130,7 @@ def test_skills_resolve_route_handles_errors():
     """The POST handler must return proper HTTP error codes."""
     route_block = ROUTES_PY[ROUTES_PY.index('/api/commands/skills/resolve'):]
     route_block = route_block[:route_block.index('if parsed.path ==')]
+    assert "session_id = str(body.get(" in route_block
     assert "bad(handler, \"command is required\")" in route_block
     assert "bad(handler, \"Skill command not found\", 404)" in route_block
     assert "bad(handler, str(e), 400)" in route_block
@@ -145,7 +156,7 @@ def test_resolve_skill_command_uses_skill_runtime(monkeypatch):
         return "/llm-wiki" if name == "llm-wiki" else None
 
     def _build(key, instr="", task_id=None, runtime_note=""):
-        seen["build"] = (key, instr)
+        seen["build"] = (key, instr, task_id)
         return "[IMPORTANT: The user has invoked the \"llm-wiki\" skill...]\nfull skill body\nUser instruction: list pages"
 
     _install_fake_skill_commands(monkeypatch, resolver=_resolve, builder=_build)
@@ -161,8 +172,32 @@ def test_resolve_skill_command_uses_skill_runtime(monkeypatch):
     assert seen == {
         "purpose": "/api/commands/skills/resolve",
         "resolve_name": "llm-wiki",
-        "build": ("/llm-wiki", "list pages"),
+        "build": ("/llm-wiki", "list pages", None),
     }
+
+
+def test_resolve_skill_command_passes_session_id_as_task_id(monkeypatch):
+    """When session_id is provided, it must be forwarded as task_id to
+    both build_skill_invocation_message and build_stacked_skill_invocation_message."""
+    seen = {}
+
+    @contextmanager
+    def _profile_scope(purpose):
+        yield
+
+    def _resolve(name):
+        return f"/{name}"
+
+    def _build(key, instr="", task_id=None, runtime_note=""):
+        seen["task_id"] = task_id
+        return "resolved skill body"
+
+    _install_fake_skill_commands(monkeypatch, resolver=_resolve, builder=_build)
+    monkeypatch.setattr(commands, "_bundle_profile_context", _profile_scope)
+
+    commands.resolve_skill_command("/llm-wiki list pages", session_id="test-session-123")
+
+    assert seen["task_id"] == "test-session-123"
 
 
 def test_resolve_skill_command_extracts_user_instruction(monkeypatch):
@@ -179,7 +214,7 @@ def test_resolve_skill_command_extracts_user_instruction(monkeypatch):
         return f"/{name}"
 
     def _build(key, instr="", task_id=None, runtime_note=""):
-        seen["build"] = (key, instr)
+        seen["build"] = (key, instr, task_id)
         return f"resolved: {instr}"
 
     _install_fake_skill_commands(monkeypatch, resolver=_resolve, builder=_build)
@@ -188,7 +223,7 @@ def test_resolve_skill_command_extracts_user_instruction(monkeypatch):
     result = commands.resolve_skill_command("/gif-search cats and dogs")
 
     assert result["message"] == "resolved: cats and dogs"
-    assert seen["build"] == ("/gif-search", "cats and dogs")
+    assert seen["build"] == ("/gif-search", "cats and dogs", None)
 
 
 def test_resolve_skill_command_no_instruction(monkeypatch):
@@ -205,7 +240,7 @@ def test_resolve_skill_command_no_instruction(monkeypatch):
         return f"/{name}"
 
     def _build(key, instr="", task_id=None, runtime_note=""):
-        seen["build"] = (key, instr)
+        seen["build"] = (key, instr, task_id)
         assert instr == "", f"Expected empty string, got {instr!r}"
         return f"resolved bare skill: {key}"
 
@@ -216,6 +251,7 @@ def test_resolve_skill_command_no_instruction(monkeypatch):
 
     assert result["message"] == "resolved bare skill: /llm-wiki"
     assert seen["build"][1] == ""
+    assert seen["build"][2] is None  # task_id should be None
 
 
 def test_resolve_skill_command_raises_for_unknown_skill(monkeypatch):
@@ -324,7 +360,7 @@ def test_resolve_stacked_skills_detects_extra_keys(monkeypatch):
         seen["type"] = "stacked"
         seen["keys"] = keys
         seen["instr"] = instr
-        return ("stacked body: loaded!", ["skill-a", "skill-b"], [])
+        return (f"stacked body: loaded! (task_id={task_id})", ["skill-a", "skill-b"], [])
 
     def _single_builder(key, instr="", task_id=None, runtime_note=""):
         seen["type"] = "single"
@@ -341,11 +377,11 @@ def test_resolve_stacked_skills_detects_extra_keys(monkeypatch):
     )
     monkeypatch.setattr(commands, "_bundle_profile_context", _profile_scope)
 
-    result = commands.resolve_skill_command("/skill-a /skill-b do X")
+    result = commands.resolve_skill_command("/skill-a /skill-b do X", session_id="sess-xyz")
 
     assert result["name"] == "skill-a"
     assert result["source"] == "stacked_skill"
-    assert result["message"] == "stacked body: loaded!"
+    assert result["message"] == "stacked body: loaded! (task_id=sess-xyz)"
     assert seen["type"] == "stacked"
     assert seen["keys"] == ["/skill-a", "/skill-b"]
     assert seen["instr"] == "do X"
@@ -353,13 +389,13 @@ def test_resolve_stacked_skills_detects_extra_keys(monkeypatch):
 
 def test_resolve_stacked_skills_falls_back_to_single(monkeypatch):
     """``/skill-a do X`` with no extra stacked skills must call the single
-    builder (not the stacked builder)."""
+    builder (not the stacked builder), passing session_id as task_id."""
 
     @contextmanager
     def _profile_scope(purpose):
         yield
 
-    seen = {"type": None}
+    seen = {"type": None, "task_id": None}
 
     def _resolve(name):
         return f"/{name}"
@@ -373,6 +409,7 @@ def test_resolve_stacked_skills_falls_back_to_single(monkeypatch):
 
     def _single_builder(key, instr="", task_id=None, runtime_note=""):
         seen["type"] = "single"
+        seen["task_id"] = task_id
         return "[IMPORTANT: The user has invoked the \"llm-wiki\" skill...]\nbody\nUser instruction: do X"
 
     _install_fake_skill_commands(
@@ -384,11 +421,12 @@ def test_resolve_stacked_skills_falls_back_to_single(monkeypatch):
     )
     monkeypatch.setattr(commands, "_bundle_profile_context", _profile_scope)
 
-    result = commands.resolve_skill_command("/skill-a do X")
+    result = commands.resolve_skill_command("/skill-a do X", session_id="test-session-789")
 
     assert result["name"] == "skill-a"
     assert result["source"] == "skill"
     assert seen["type"] == "single"
+    assert seen["task_id"] == "test-session-789"
 
 
 def test_resolve_stacked_skills_raises_on_failure(monkeypatch):

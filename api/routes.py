@@ -14739,8 +14739,10 @@ def handle_post(handler, parsed) -> bool:
         if not command:
             return bad(handler, "command is required")
 
+        session_id = str(body.get("session_id", "") or "").strip() or None
+
         try:
-            return j(handler, resolve_skill_command(command))
+            return j(handler, resolve_skill_command(command, session_id=session_id))
         except KeyError:
             return bad(handler, "Skill command not found", 404)
         except ValueError as e:

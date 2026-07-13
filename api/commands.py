@@ -204,7 +204,7 @@ def resolve_bundle_command(command: str) -> dict[str, Any]:
     }
 
 
-def resolve_skill_command(command: str) -> dict[str, Any]:
+def resolve_skill_command(command: str, session_id: str | None = None) -> dict[str, Any]:
     """Expand a skill slash command into the backend invocation payload."""
     skill_name, user_instruction = _parse_slash_command(command)
 
@@ -232,6 +232,7 @@ def resolve_skill_command(command: str) -> dict[str, Any]:
                 stacked_result = build_stacked_skill_invocation_message(
                     [cmd_key, *extra_keys],
                     user_instruction,
+                    task_id=session_id,
                 )
                 if stacked_result:
                     message, loaded_names, missing = stacked_result
@@ -239,7 +240,7 @@ def resolve_skill_command(command: str) -> dict[str, Any]:
                     raise RuntimeError("Failed to load stacked skills")
             else:
                 message = build_skill_invocation_message(
-                    cmd_key, user_instruction
+                    cmd_key, user_instruction, task_id=session_id
                 )
     except (KeyError, ValueError, RuntimeError):
         raise

@@ -451,12 +451,14 @@ async function resolveBundleCommand(text,_meta){
   });
 }
 
-async function resolveSkillCommand(text){
+async function resolveSkillCommand(text, sessionId){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
+  const body={command};
+  if(sessionId) body.session_id=sessionId;
   return api('/api/commands/skills/resolve',{
     method:'POST',
-    body:JSON.stringify({command})
+    body:JSON.stringify(body)
   });
 }
 
