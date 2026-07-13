@@ -338,8 +338,8 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     args = payload.get("args") if isinstance(payload.get("args"), (list, dict)) else []
     run_id = str(payload.get("run_id") or "").strip()
     approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
-    if not approval_id:
-        approval_id = uuid.uuid4().hex
+    if not approval_id and run_id:
+        approval_id = f"gwrun:{run_id}"
     risk = str(payload.get("risk_level") or "high").strip()
     choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
     allow_permanent = payload.get("allow_permanent")
@@ -478,6 +478,10 @@ def _run_gateway_runs_api_streaming(
                 approval_data = _gateway_runs_approval_event(payload)
                 if approval_data:
                     approval_data["run_id"] = run_id
+                    if not approval_data.get("approval_id"):
+                        approval_data["approval_id"] = f"gwrun:{run_id}"
+                    from api.route_approvals import submit_gateway_pending_mirror
+                    submit_gateway_pending_mirror(session_id, approval_data)
                     put_gateway_event("approval", approval_data)
                 sse_event = "message"
                 continue
@@ -522,6 +526,8 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event == "run.completed":
+                from api.route_approvals import retire_gateway_pending_mirror
+                retire_gateway_pending_mirror(session_id, run_id=run_id)
                 if payload.get("error"):
                     raise RuntimeError(str(payload["error"]))
                 output = str(payload.get("output") or "")
@@ -533,8 +539,12 @@ def _run_gateway_runs_api_streaming(
                 sse_event = "message"
                 continue
             if payload_event == "run.failed":
+                from api.route_approvals import retire_gateway_pending_mirror
+                retire_gateway_pending_mirror(session_id, run_id=run_id)
                 raise RuntimeError(str(payload.get("error") or "Gateway run failed"))
             if payload_event == "run.cancelled":
+                from api.route_approvals import retire_gateway_pending_mirror
+                retire_gateway_pending_mirror(session_id, run_id=run_id)
                 put_gateway_event("cancel", {"message": "Cancelled by gateway"})
                 return None, usage
             reasoning_delta = _gateway_sse_reasoning_delta(payload)
@@ -908,12 +918,12 @@ def _run_gateway_chat_streaming(
                             _approval_run_id = str(approval_data.get("run_id") or "").strip()
                             if _approval_run_id:
                                 _STREAM_RUN_IDS[stream_id] = _approval_run_id
-                            put_gateway_event("approval", approval_data)
                             try:
                                 from api.route_approvals import submit_gateway_pending_mirror
                                 submit_gateway_pending_mirror(session_id, approval_data)
                             except Exception:
                                 logger.debug("submit_gateway_pending_mirror failed", exc_info=True)
+                            put_gateway_event("approval", approval_data)
                         else:
                             logger.debug("Ignoring malformed gateway approval payload")
                         sse_event = "message"

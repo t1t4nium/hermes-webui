@@ -9715,7 +9715,8 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _approval_sse_notify_locked,
     _approval_sse_notify,
     _GATEWAY_MIRROR_FLAG,
-    _gateway_mirrored_pending_run_id,
+    gateway_pending_mirror,
+    retire_gateway_pending_mirror,
     reconcile_gateway_pending_mirror_locked,
     submit_gateway_pending_mirror,
     submit_pending,
@@ -23914,29 +23915,47 @@ def _handle_approval_respond(handler, body):
         )
         from api.config import get_config as _get_config
         s = get_session(sid)
-        _run_id = None
+        _candidate_run_id = None
         if s is not None:
             active_sid = getattr(s, "active_stream_id", None)
             if active_sid:
-                _run_id = _STREAM_RUN_IDS.get(active_sid)
-            if not _run_id and approval_id:
-                _run_id = _gateway_mirrored_pending_run_id(sid, approval_id)
+                _candidate_run_id = _STREAM_RUN_IDS.get(active_sid)
+        matched_mirror = gateway_pending_mirror(sid, approval_id=approval_id, run_id=_candidate_run_id)
+        _run_id = matched_mirror["run_id"] if matched_mirror else None
+        if not matched_mirror and approval_id:
+            with _lock:
+                queue = _pending.get(sid)
+                entries = queue if isinstance(queue, list) else [queue] if queue else []
+                local_match = any(
+                    isinstance(entry, dict)
+                    and entry.get("approval_id") == approval_id
+                    and not entry.get(_GATEWAY_MIRROR_FLAG)
+                    for entry in entries
+                )
+            if local_match:
+                _candidate_run_id = None
         if _run_id:
-            if not approval_id:
-                return bad(handler, "approval_id is required for gateway approvals")
             from api.runner_client import HttpRunnerClient, RunnerClientError
             _cfg = _get_config()
             _base = _gateway_base_url(_cfg)
             _key = _gateway_api_key()
             try:
-                HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(_run_id, approval_id, choice)
+                HttpRunnerClient(base_url=_base, api_key=_key).respond_approval(
+                    _run_id, matched_mirror["approval_id"], choice
+                )
             except (RunnerClientError, ValueError) as exc:
                 return j(handler, {"ok": False, "choice": choice, "relayed": True, "error": str(exc)}, status=502)
             # The outbound relay only resumes the remote run; the local mirror
             # still needs the same cleanup path so the parked entry, mirrored
             # card, and agent signal all settle here too.
-            _resolve_approval_legacy(sid, approval_id, choice)
+            cleanup_approval_id = matched_mirror["approval_id"]
+            _resolve_approval_legacy(sid, cleanup_approval_id, choice)
+            retire_gateway_pending_mirror(sid, approval_id=cleanup_approval_id, run_id=_run_id)
             return j(handler, {"ok": True, "choice": choice, "relayed": True})
+        if _candidate_run_id or approval_id.startswith("gwrun:"):
+            return j(handler, {"ok": False, "choice": choice, "relayed": False,
+                               "code": "gateway_run_unavailable",
+                               "error": _GATEWAY_APPROVAL_RELAY_UNAVAILABLE}, status=409)
         # Only a still-mirrored gateway approval with a missing run should 409;
         # stale or empty gateway clicks fall through to local resolution.
         if webui_gateway_chat_enabled(_get_config()) and _gateway_pending_approval_without_run_id(

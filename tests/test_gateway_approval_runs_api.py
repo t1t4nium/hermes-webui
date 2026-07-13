@@ -6,6 +6,7 @@ import json
 import socket
 import threading
 import urllib.error
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
@@ -301,6 +302,8 @@ def test_gateway_approval_event_translation():
     assert result["risk_level"] == "high"
     assert result["run_id"] == "run-999"
     assert result["approval_id"] == "appr-1"
+    empty_id = _gateway_runs_approval_event({**payload, "approval_id": "", "id": ""})
+    assert empty_id["approval_id"] == "gwrun:run-999"
 
     downgraded = _gateway_runs_approval_event({
         "command": "rm -rf /tmp/x",
@@ -412,6 +415,169 @@ def test_gateway_runs_api_streaming_parses_real_run_events():
     assert events[0][1]["approval_id"] == "appr-1"
     assert events[1] == ("reasoning", {"text": "thinking..."})
     assert events[2] == ("token", {"text": "Hello"})
+    import api.route_approvals as approvals
+    assert approvals.gateway_pending_mirror("sess1", run_id="run-abc") is None
+
+
+def test_empty_id_runs_approval_reaches_real_response_lifecycle():
+    """Runs API empty IDs are carried and resolved through the live mirror."""
+    from api.gateway_chat import _run_gateway_runs_api_streaming
+    import api.route_approvals as approvals
+    import api.routes as routes
+
+    for choice in ("once", "deny"):
+        sid = f"sess-real-{choice}"
+        stream_id = f"stream-real-{choice}"
+        events = []
+
+        class _JsonResponse:
+            def read(self, _limit=None):
+                return b'{"run_id":"run-real-' + choice.encode() + b'"}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return None
+
+        class _SseResponse:
+            def __iter__(self):
+                return iter([
+                    b'data: {"event":"approval.request","command":"echo x",'
+                    b'"description":"approval","approval_id":""}\n',
+                    b'\n', b'data: [DONE]\n', b'\n'
+                ])
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return None
+
+        def fake_urlopen(req, *, timeout=None):
+            return _JsonResponse() if req.full_url.endswith("/v1/runs") else _SseResponse()
+
+        handler = MagicMock()
+        handler.wfile = io.BytesIO()
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+             patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id=None)), \
+             patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+             patch("api.gateway_chat._gateway_api_key", return_value=""), \
+             patch("api.runner_client.HttpRunnerClient._request_json", return_value={"ok": True}):
+            _run_gateway_runs_api_streaming(
+                sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
+                put_gateway_event=lambda event, data: events.append((event, data)),
+                cancel_event=threading.Event(),
+            )
+            approval_id = events[0][1]["approval_id"]
+            assert approval_id == f"gwrun:run-real-{choice}"
+            assert approvals.gateway_pending_mirror(sid, approval_id=approval_id)["run_id"] == f"run-real-{choice}"
+            routes._handle_approval_respond(handler, {
+                "session_id": sid, "choice": choice, "approval_id": approval_id,
+            })
+        assert handler.send_response.call_args.args[0] == 200
+        assert json.loads(handler.wfile.getvalue().decode())["ok"] is True
+        assert approvals.gateway_pending_mirror(sid, approval_id=approval_id) is None
+        approvals._pending.pop(sid, None)
+
+
+def test_gateway_mirror_match_is_session_scoped_and_retires_one_run():
+    import api.route_approvals as approvals
+
+    sid = "sess-multi-run"
+    other_sid = "sess-other-run"
+    approvals._pending.pop(sid, None)
+    approvals._pending.pop(other_sid, None)
+    try:
+        approvals.submit_gateway_pending_mirror(sid, {"run_id": "run-a", "command": "a"})
+        approvals.submit_gateway_pending_mirror(sid, {"run_id": "run-b", "command": "b"})
+        first = approvals.gateway_pending_mirror(sid, approval_id="gwrun:run-a")
+        second = approvals.gateway_pending_mirror(sid, run_id="run-b")
+        assert first["approval_id"] == "gwrun:run-a"
+        assert second["approval_id"] == "gwrun:run-b"
+        assert approvals.gateway_pending_mirror(other_sid, run_id="run-a") is None
+        assert approvals.retire_gateway_pending_mirror(sid, run_id="run-a") is True
+        assert approvals.gateway_pending_mirror(sid, run_id="run-a") is None
+        assert approvals.gateway_pending_mirror(sid, run_id="run-b") is not None
+    finally:
+        approvals._pending.pop(sid, None)
+        approvals._pending.pop(other_sid, None)
+
+
+def test_stale_gateway_card_does_not_relay_live_run():
+    from api.gateway_chat import _STREAM_RUN_IDS
+    import api.route_approvals as approvals
+
+    sid = "sess-stale-gateway"
+    stream_id = "sid-stale-live-run"
+    _STREAM_RUN_IDS[stream_id] = "run-live"
+    approvals._pending.pop(sid, None)
+    approvals.submit_gateway_pending_mirror(sid, {
+        "run_id": "run-live", "approval_id": "gwrun:run-live", "command": "echo live"
+    })
+
+    mock_session = MagicMock()
+    mock_session.active_stream_id = stream_id
+    handler = MagicMock()
+    handler.wfile = io.BytesIO()
+
+    with patch("api.routes.get_session", return_value=mock_session), \
+         patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+         patch("api.gateway_chat._gateway_api_key", return_value=""), \
+         patch("api.runner_client.HttpRunnerClient._request_json") as request_json:
+        from api.routes import _handle_approval_respond
+        _handle_approval_respond(handler, {
+            "session_id": sid,
+            "choice": "once",
+            "approval_id": "gwrun:run-stale",
+        })
+
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert handler.send_response.call_args.args[0] == 409
+    assert payload["code"] == "gateway_run_unavailable"
+    request_json.assert_not_called()
+    assert approvals.gateway_pending_mirror(sid, run_id="run-live") is not None
+
+    _STREAM_RUN_IDS.pop(stream_id, None)
+    approvals._pending.pop(sid, None)
+
+
+def test_retained_gateway_card_does_not_relay_different_active_run():
+    from api.gateway_chat import _STREAM_RUN_IDS
+    import api.route_approvals as approvals
+
+    sid = "sess-retained-gateway"
+    stream_id = "sid-retained-live-run"
+    _STREAM_RUN_IDS[stream_id] = "run-live"
+    approvals._pending.pop(sid, None)
+    approvals.submit_gateway_pending_mirror(sid, {
+        "run_id": "run-retained", "approval_id": "gwrun:run-retained", "command": "echo retained"
+    })
+    approvals.submit_gateway_pending_mirror(sid, {
+        "run_id": "run-live", "approval_id": "gwrun:run-live", "command": "echo live"
+    })
+
+    mock_session = MagicMock()
+    mock_session.active_stream_id = stream_id
+    handler = MagicMock()
+    handler.wfile = io.BytesIO()
+
+    with patch("api.routes.get_session", return_value=mock_session), \
+         patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+         patch("api.gateway_chat._gateway_api_key", return_value=""), \
+         patch("api.runner_client.HttpRunnerClient._request_json") as request_json:
+        from api.routes import _handle_approval_respond
+        _handle_approval_respond(handler, {
+            "session_id": sid,
+            "choice": "once",
+            "approval_id": "gwrun:run-retained",
+        })
+
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert handler.send_response.call_args.args[0] == 409
+    assert payload["code"] == "gateway_run_unavailable"
+    request_json.assert_not_called()
+    assert approvals.gateway_pending_mirror(sid, approval_id="gwrun:run-retained") is not None
+    assert approvals.gateway_pending_mirror(sid, approval_id="gwrun:run-live") is not None
+
+    _STREAM_RUN_IDS.pop(stream_id, None)
+    approvals._pending.pop(sid, None)
 
 
 def test_gateway_runs_api_streaming_preserves_multimodal_input():
@@ -546,9 +712,13 @@ def test_gateway_runs_api_cancel_does_not_emit_empty_response():
 def test_gateway_approval_response_relay():
     """_handle_approval_respond relays the real gateway approval body."""
     from api.gateway_chat import _STREAM_RUN_IDS
+    import api.route_approvals as approvals
 
     # Seed the mapping.
     _STREAM_RUN_IDS["sid-relay"] = "run abc/1"
+    approvals.submit_gateway_pending_mirror("sess-relay", {
+        "run_id": "run abc/1", "approval_id": "appr x/y", "command": "echo x"
+    })
 
     mock_session = MagicMock()
     mock_session.active_stream_id = "sid-relay"
@@ -578,14 +748,89 @@ def test_gateway_approval_response_relay():
 
     # Cleanup.
     _STREAM_RUN_IDS.pop("sid-relay", None)
+    approvals._pending.pop("sess-relay", None)
+
+
+def test_gateway_approval_response_without_approval_id_routes_by_run_id():
+    """Runs API approvals resolve by the server-owned run ID."""
+    from api.gateway_chat import _STREAM_RUN_IDS
+    import api.route_approvals as approvals
+
+    _STREAM_RUN_IDS["sid-relay-empty-id"] = "run abc/1"
+    approvals.submit_gateway_pending_mirror("sess-relay", {
+        "run_id": "run abc/1", "approval_id": "", "command": "echo x"
+    })
+
+    mock_session = MagicMock()
+    mock_session.active_stream_id = "sid-relay-empty-id"
+    captured = {}
+
+    def fake_request_json(self, req):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data)
+        return {"ok": True}
+
+    handler = MagicMock()
+    handler.wfile = io.BytesIO()
+
+    with patch("api.routes.get_session", return_value=mock_session), \
+         patch("api.runner_client.HttpRunnerClient._request_json", new=fake_request_json), \
+         patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
+         patch("api.gateway_chat._gateway_api_key", return_value=""), \
+         patch("api.routes._resolve_approval_legacy", return_value=True) as cleanup:
+        from api.routes import _handle_approval_respond
+        _handle_approval_respond(
+            handler,
+            {"session_id": "sess-relay", "choice": "once", "approval_id": ""},
+        )
+
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    status = handler.send_response.call_args.args[0]
+    assert status == 200, f"status={status} payload={payload} outbound={captured}"
+    assert captured["url"] == "http://gw:8642/v1/runs/run%20abc%2F1/approval"
+    assert captured["body"] == {"choice": "once", "approval_id": "gwrun:run abc/1"}
+    assert payload["ok"] is True
+    assert payload["relayed"] is True
+    cleanup.assert_called_once_with("sess-relay", "gwrun:run abc/1", "once")
+
+    _STREAM_RUN_IDS.pop("sid-relay-empty-id", None)
+    approvals._pending.pop("sess-relay", None)
+
+
+def test_gateway_mirrored_pending_approval_id_by_run_id_skips_older_local_entries():
+    """Run-scoped cleanup must target the mirrored gateway card, not queue head."""
+    import api.route_approvals as approvals
+
+    sid = "sess-relay-mirror"
+    approvals._pending.pop(sid, None)
+    approvals._gateway_queues.pop(sid, None)
+    try:
+        approvals._pending[sid] = [{"approval_id": "local-1", "command": "echo local"}]
+        approvals._gateway_queues[sid] = [SimpleNamespace(data={
+            "approval_id": "gateway-real",
+            "command": "echo gateway",
+            "run_id": "run-xyz",
+        })]
+        approvals.submit_gateway_pending_mirror(sid, {})
+        queue = approvals._pending[sid]
+        assert queue[0]["approval_id"] == "local-1"
+        assert queue[1]["approval_id"] == "gateway-real"
+        assert approvals._gateway_mirrored_pending_approval_id_by_run_id(sid, "run-xyz") == "gateway-real"
+    finally:
+        approvals._pending.pop(sid, None)
+        approvals._gateway_queues.pop(sid, None)
 
 
 def test_gateway_approval_response_relay_failure_returns_502():
     """Gateway relay failures must surface as HTTP errors to the frontend."""
     from api.gateway_chat import _STREAM_RUN_IDS
     from api.runner_client import RunnerClientError
+    import api.route_approvals as approvals
 
     _STREAM_RUN_IDS["sid-relay-fail"] = "run-abc"
+    approvals.submit_gateway_pending_mirror("sess-relay", {
+        "run_id": "run-abc", "approval_id": "appr-x", "command": "echo x"
+    })
 
     mock_session = MagicMock()
     mock_session.active_stream_id = "sid-relay-fail"
@@ -609,13 +854,18 @@ def test_gateway_approval_response_relay_failure_returns_502():
     assert "relay failed" in payload["error"]
 
     _STREAM_RUN_IDS.pop("sid-relay-fail", None)
+    approvals._pending.pop("sess-relay", None)
 
 
 def test_gateway_approval_response_invalid_gateway_base_returns_502():
     """Misconfigured gateway bases must not fall through to the local approval path."""
     from api.gateway_chat import _STREAM_RUN_IDS
+    import api.route_approvals as approvals
 
     _STREAM_RUN_IDS["sid-relay-invalid-base"] = "run-abc"
+    approvals.submit_gateway_pending_mirror("sess-relay", {
+        "run_id": "run-abc", "approval_id": "appr-x", "command": "echo x"
+    })
 
     mock_session = MagicMock()
     mock_session.active_stream_id = "sid-relay-invalid-base"
@@ -638,6 +888,7 @@ def test_gateway_approval_response_invalid_gateway_base_returns_502():
     assert "runner base_url must be http(s)" in payload["error"]
 
     _STREAM_RUN_IDS.pop("sid-relay-invalid-base", None)
+    approvals._pending.pop("sess-relay", None)
 
 
 # ---------------------------------------------------------------------------
