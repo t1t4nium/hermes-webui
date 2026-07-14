@@ -17,7 +17,9 @@ NODE = shutil.which("node")
 
 def _run_reasoning_scene(
     *,
+    activity_mode: str = "transparent_stream",
     fail_first_anchor_render: bool = False,
+    fail_anchor_render_on: int | None = None,
     stale_active_stream: bool = False,
     stale_live_turn: bool = False,
     show_thinking: bool = True,
@@ -30,8 +32,11 @@ def _run_reasoning_scene(
         "ISSUE5720_ANCHORS_JS",
         str(ROOT / "static" / "assistant_turn_anchors.js"),
     )
+    env["ISSUE5720_ACTIVITY_MODE"] = activity_mode
     if fail_first_anchor_render:
         env["ISSUE5720_FAIL_FIRST_ANCHOR_RENDER"] = "1"
+    if fail_anchor_render_on is not None:
+        env["ISSUE5720_FAIL_ANCHOR_RENDER_ON"] = str(fail_anchor_render_on)
     if stale_active_stream:
         env["ISSUE5720_STALE_ACTIVE_STREAM"] = "1"
     if stale_live_turn:
@@ -131,6 +136,43 @@ def test_reasoning_fallback_rebuilds_from_another_sessions_live_turn():
     assert result["anchor_reasoning_events"] == 1
     assert result["anchor_reasoning_text"] == "Plan step"
     assert result["inflight_reasoning_text"] == "Plan step"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("activity_mode", ["transparent_stream", "compact_worklog"])
+def test_later_deferred_anchor_paint_updates_existing_reasoning_owner(activity_mode):
+    result = _run_reasoning_scene(
+        activity_mode=activity_mode,
+        fail_anchor_render_on=2,
+    )
+
+    assert result["first_text"] == "Plan"
+    assert result["second_text"] == "Plan step"
+    assert result["same_node"] is True
+    assert result["live_reasoning_rows"] == 1
+    assert result["fallback_rows_after_recovery"] == 0
+    assert result["visible_reasoning_owners"] == 1
+    assert result["anchor_render_attempts"] == 2
+    assert result["anchor_reasoning_events"] == 1
+    assert result["anchor_reasoning_text"] == "Plan step"
+    assert result["inflight_reasoning_text"] == "Plan step"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_later_deferred_anchor_paint_remains_hidden_in_final_answer_only_mode():
+    result = _run_reasoning_scene(
+        activity_mode="hide_all_activity",
+        fail_anchor_render_on=2,
+    )
+
+    assert result["first_text"] is None
+    assert result["second_text"] is None
+    assert result["live_reasoning_rows"] == 0
+    assert result["fallback_rows_after_recovery"] == 0
+    assert result["visible_reasoning_owners"] == 0
+    assert result["anchor_render_attempts"] == 2
+    assert result["anchor_reasoning_events"] == 1
+    assert result["anchor_reasoning_text"] == "Plan step"
 
 
 _NODE_SCENE = r"""
@@ -304,7 +346,7 @@ function matchesSimple(el, selector){
 }
 
 global.window={
-  _chatActivityDisplayMode:'transparent_stream',
+  _chatActivityDisplayMode:process.env.ISSUE5720_ACTIVITY_MODE||'transparent_stream',
   _showThinking:process.env.ISSUE5720_SHOW_THINKING!=='0',
   _simplifiedToolCalling:true,
 };
@@ -341,6 +383,28 @@ global.scrollIfPinned=()=>{};
 global._moveLiveRunStatusToTurnEnd=()=>{};
 global._messageUserUnpinned=false;
 global._syncTransparentEventControls=()=>{};
+global._syncToolCallGroupSummary=()=>{};
+global._captureWorklogDetailDisclosureState=()=>null;
+global._restoreWorklogDetailDisclosureState=()=>{};
+global._startActivityElapsedTimer=()=>{};
+global._dedupeLiveProcessedWorklogAnchors=()=>{};
+global._toolWorklogListEl=group=>group&&group.querySelector&&group.querySelector('.tool-worklog-list')||group;
+global.ensureActivityGroup=(blocks,opts)=>{
+  opts=opts||{};
+  const key=String(opts.activityKey||'');
+  let group=key&&blocks.querySelector&&blocks.querySelector(`.tool-worklog-group[data-tool-worklog-key="${CSS.escape(key)}"]`);
+  if(group) return group;
+  group=new FakeElement('div');
+  group.className='tool-worklog-group tool-call-group';
+  group.setAttribute('data-tool-worklog-group','1');
+  group.setAttribute('data-live-tool-call-group','1');
+  group.setAttribute('data-tool-worklog-key',key);
+  const list=new FakeElement('div');
+  list.className='tool-worklog-list';
+  group.appendChild(list);
+  blocks.appendChild(group);
+  return group;
+};
 global._thinkingActivityNode=text=>{
   const row=new FakeElement('div');
   row.className='agent-activity-thinking transparent-thinking-event';
@@ -382,7 +446,10 @@ for(const name of [
   '_transparentLiveRowKey','_transparentLiveRowsCompatible',
   '_transparentLiveRowAttributePairs','_transparentLiveRowInteractiveState',
   '_refreshTransparentThinkingLiveRow','_refreshTransparentLiveRow',
+  '_thinkingMarkup','_renderThinkingInto',
   '_resetMismatchedLiveAssistantTurnForSession',
+  '_liveAnchorReasoningRowForFallback','_updateLiveAnchorReasoningRowForFallback',
+  '_anchorSceneNodeForRow','_anchorSceneWorklogGroup','_renderAnchorSceneRowsIntoWorklog',
   'isLiveAnchorActivitySceneOwner','_projectLiveAnchorActivitySceneForStream',
   '_renderLiveAnchorActivitySceneTransparent','renderLiveAnchorActivityScene',
   '_renderLiveAnchorActivitySceneForStream','appendThinking','updateThinking',
@@ -395,10 +462,12 @@ _renderLiveAnchorActivitySceneTransparent=function(...args){
   return realTransparentRender(...args);
 };
 const failFirstAnchorRender=process.env.ISSUE5720_FAIL_FIRST_ANCHOR_RENDER==='1';
+const failAnchorRenderOn=Number(process.env.ISSUE5720_FAIL_ANCHOR_RENDER_ON||'0');
 let anchorRenderAttempts=0;
 window._renderLiveAnchorActivitySceneForStream=function(...args){
   anchorRenderAttempts+=1;
   if(failFirstAnchorRender&&anchorRenderAttempts===1) return false;
+  if(failAnchorRenderOn&&anchorRenderAttempts===failAnchorRenderOn) return false;
   return _renderLiveAnchorActivitySceneForStream(...args);
 };
 window.isLiveAnchorActivitySceneOwner=isLiveAnchorActivitySceneOwner;
@@ -442,15 +511,33 @@ const source=FakeEventSource.instances[0];
 if(!source) throw new Error('attachLiveStream did not create EventSource');
 if(process.env.ISSUE5720_STALE_ACTIVE_STREAM==='1') S.activeStreamId='stream-new';
 
+function anchorReasoningRows(){
+  return turn.querySelectorAll(
+    '[data-anchor-scene-row="1"][data-anchor-source-event-type="reasoning"],'+
+    '[data-anchor-scene-row="1"][data-anchor-row-role="thinking"]'
+  );
+}
+function fallbackReasoningRows(){
+  return turn.querySelectorAll('.agent-activity-thinking[data-live-thinking="1"]')
+    .filter(row=>row.getAttribute('data-anchor-scene-row')!=='1');
+}
+function reasoningText(row){
+  if(!row) return null;
+  const pre=row.querySelector&&row.querySelector('pre');
+  return pre?pre.textContent:row.textContent;
+}
+
 source.emit('reasoning',{text:'Plan '});
-const first=turn.querySelector('.transparent-event-row[data-event-type="thinking"][data-anchor-scene-row="1"]');
-const firstText=first&&first.querySelector('pre')&&first.querySelector('pre').textContent;
-const firstFallback=turn.querySelector('.agent-activity-thinking[data-live-thinking="1"]');
-const firstFallbackText=firstFallback&&firstFallback.querySelector('pre')&&firstFallback.querySelector('pre').textContent;
+const first=anchorReasoningRows()[0]||null;
+const firstText=reasoningText(first);
+const firstFallback=fallbackReasoningRows()[0]||null;
+const firstFallbackText=reasoningText(firstFallback);
 const passAfterFirst=transparentRenderPasses;
 source.emit('reasoning',{text:'step'});
-const second=turn.querySelector('.transparent-event-row[data-event-type="thinking"][data-anchor-scene-row="1"]');
-const secondText=second&&second.querySelector('pre')&&second.querySelector('pre').textContent;
+const second=anchorReasoningRows()[0]||null;
+const secondText=reasoningText(second);
+const anchorRowsAfterRecovery=anchorReasoningRows();
+const fallbackRowsAfterRecovery=fallbackReasoningRows();
 const registry=window._liveAnchorRegistries&&window._liveAnchorRegistries.get('stream-1');
 const anchorReasoningEvents=registry&&registry.anchor&&Array.isArray(registry.anchor.activity_events)
   ? registry.anchor.activity_events.filter(event=>event&&event.source_event_type==='reasoning')
@@ -461,8 +548,9 @@ process.stdout.write(JSON.stringify({
   first_fallback_text:firstFallbackText,
   second_text:secondText,
   same_node:first===second,
-  live_reasoning_rows:turn.querySelectorAll('.transparent-event-row[data-event-type="thinking"][data-anchor-scene-row="1"]').length,
-  fallback_rows_after_recovery:turn.querySelectorAll('.agent-activity-thinking[data-live-thinking="1"]').length,
+  live_reasoning_rows:anchorRowsAfterRecovery.length,
+  fallback_rows_after_recovery:fallbackRowsAfterRecovery.length,
+  visible_reasoning_owners:anchorRowsAfterRecovery.length+fallbackRowsAfterRecovery.length,
   render_passes:[passAfterFirst,transparentRenderPasses],
   anchor_render_attempts:anchorRenderAttempts,
   anchor_reasoning_events:anchorReasoningEvents.length,

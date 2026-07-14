@@ -12360,6 +12360,60 @@ function _resetMismatchedLiveAssistantTurnForSession(turn, sessionId){
   turn.dataset.sessionId=sid;
   return true;
 }
+function _liveAnchorReasoningRowForFallback(turn, opts){
+  opts=opts||{};
+  const blocks=typeof _assistantTurnBlocks==='function' ? _assistantTurnBlocks(turn) : turn;
+  if(!turn||!blocks||!blocks.querySelectorAll) return null;
+  const streamId=String(opts.streamId||S.activeStreamId||'');
+  const sessionId=String(opts.sessionId||(S.session&&S.session.session_id)||'');
+  const rows=blocks.querySelectorAll(
+    '[data-anchor-scene-row="1"][data-anchor-source-event-type="reasoning"],'+
+    '[data-anchor-scene-row="1"][data-anchor-row-role="thinking"],'+
+    '.wl-reason[data-worklog-anchor-reason="1"]'
+  );
+  for(const row of Array.from(rows)){
+    const rowStreamId=String(row.getAttribute&&row.getAttribute('data-anchor-stream-id')||'');
+    if(rowStreamId&&streamId&&rowStreamId!==streamId) continue;
+    const rowSessionId=String(row.getAttribute&&row.getAttribute('data-session-id')||'');
+    if(rowSessionId&&sessionId&&rowSessionId!==sessionId) continue;
+    return row;
+  }
+  return null;
+}
+function _updateLiveAnchorReasoningRowForFallback(turn, text, opts){
+  const clean=_sanitizeThinkingDisplayText(text);
+  if(!clean||window._showThinking===false) return false;
+  const row=_liveAnchorReasoningRowForFallback(turn, opts);
+  if(!row) return false;
+  if(row.classList&&row.classList.contains('wl-reason')){
+    if(typeof _renderWorklogReasonInto==='function') _renderWorklogReasonInto(row, clean);
+    else row.textContent=clean;
+    const group=row.closest&&row.closest('.tool-worklog-group,.tool-call-group,.live-worklog');
+    if(group&&typeof _syncToolCallGroupSummary==='function') _syncToolCallGroupSummary(group);
+  }else if(row.classList&&row.classList.contains('transparent-event-row')){
+    _renderThinkingInto(row, clean);
+    const eventAt=row.getAttribute&&row.getAttribute('data-event-at');
+    const nextTs=typeof _firstValidTimestampSeconds==='function'
+      ? _firstValidTimestampSeconds(opts&&opts.ts, opts&&opts.timestamp, opts&&opts.created_at, eventAt)
+      : null;
+    if(typeof _decorateTransparentEventRow==='function'){
+      _decorateTransparentEventRow(row,{
+        type:'thinking',
+        text:clean,
+        preview:clean,
+        ts:nextTs||undefined,
+        live:true,
+        segmentSeq:opts&&opts.segmentSeq,
+        burstId:opts&&opts.burstId,
+      });
+    }
+  }else{
+    _renderThinkingInto(row, clean);
+  }
+  if(turn&&typeof _syncTransparentEventControls==='function') _syncTransparentEventControls(turn);
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
+  return true;
+}
 function renderLiveAnchorActivityScene(streamId, scene, opts){
   opts=opts||{};
   const requestedMode=opts.mode;
@@ -18468,6 +18522,7 @@ function appendThinking(text='', options){
       String(existingLiveTurn.dataset.sessionId)!==String(S.session.session_id||'')){
     if(!_resetMismatchedLiveAssistantTurnForSession(existingLiveTurn, S.session.session_id)) return;
   }
+  if(anchorRenderFallback&&existingLiveTurn&&_updateLiveAnchorReasoningRowForFallback(existingLiveTurn,text,options)) return;
   if(!allowPendingPlaceholder&&!anchorRenderFallback&&isLiveAnchorActivitySceneOwner(S.activeStreamId)){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
     return;
