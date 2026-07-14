@@ -14,10 +14,8 @@ PROFILE_CONCEPT_KEYS = [
     "profile_concept_desc_workspaces",
     "profile_concept_desc_together",
     "profile_concept_example",
-    "profile_concept_workspace_binding",
     "profile_concept_label_together",
     "profile_concept_label_example",
-    "profile_concept_label_binding",
 ]
 
 
@@ -84,9 +82,3 @@ def test_example_row_present():
     """The concept detail view must render an example row."""
     detail_body = _render_profile_concept_help_body()
     assert "t('profile_concept_example')" in detail_body
-
-
-def test_binding_row_present():
-    """The concept detail view must render a workspace-binding row."""
-    detail_body = _render_profile_concept_help_body()
-    assert "t('profile_concept_workspace_binding')" in detail_body

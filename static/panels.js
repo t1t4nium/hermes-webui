@@ -6665,7 +6665,6 @@ function _renderProfileConceptHelp(activeName){
         <div class="detail-row"><div class="detail-row-label">${esc(t('tab_workspaces'))}</div><div class="detail-row-value">${esc(t('profile_concept_desc_workspaces'))}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('profile_concept_label_together'))}</div><div class="detail-row-value">${esc(t('profile_concept_desc_together'))}</div></div>
         <div class="detail-row" style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px"><div class="detail-row-label">${esc(t('profile_concept_label_example'))}</div><div class="detail-row-value">${esc(t('profile_concept_example'))}</div></div>
-        <div class="detail-row"><div class="detail-row-label">${esc(t('profile_concept_label_binding'))}</div><div class="detail-row-value">${esc(t('profile_concept_workspace_binding'))}</div></div>
       </div>
     </div>`;
   body.style.display = '';
