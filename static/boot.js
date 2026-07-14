@@ -2320,6 +2320,19 @@ document.addEventListener('keydown',async e=>{
       return;
     }
   }
+  // Cmd/Ctrl+/ focuses the message composer without creating a chat.
+  // Match on the '/' CHARACTER (e.key), not the physical key position: on QWERTZ
+  // layouts the physical Slash key produces Ctrl+- (browser zoom-out) and '/' is
+  // typed as Shift+7, so matching the physical code both steals zoom and misses
+  // the real '/' chord. e.key==='/' is layout-correct on every keyboard.
+  if((e.metaKey||e.ctrlKey)&&!e.altKey&&e.key==='/'){
+    const t=e.target;
+    const isText=t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable);
+    if(isText) return;
+    const composer=$('msg');
+    if(composer){e.preventDefault();composer.focus();}
+    return;
+  }
   // Enter on approval card = Allow once (when a button inside the card is focused or
   // card is visible and focus is not on an input/textarea/select)
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
