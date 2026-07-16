@@ -71,6 +71,10 @@
 
 ### Fixed
 
+- **Approval and clarify popups no longer collapse to tiny blank windows on very narrow screens.** On very narrow viewports the clarify card could shrink to an unreadable sliver; it now gets a `min-width` and `overflow:visible` matching the approval card. Thanks @webtecnica. (#6104, #6094)
+
+- **Stream event timestamps no longer break the row layout on narrow foldable screens.** On screens under 360px the per-event timestamps could spill out of tool/thinking card headers; the headers now clip overflow so the timestamp layout holds. (Tool names stay visible — an earlier draft hid them at ≤360px, which lost tool identity; the header clip alone prevents the spill.) Thanks @webtecnica. (#6106, #6099)
+
 - **Streaming sidebar polls no longer re-run the expensive CLI/cron projection every few seconds.** The per-stream cache TTL was pinned at 30s while the frontend's streaming sidebar poll cadence could approach it, so the state.db CLI/cron projection (and its ~200 sidecar reads) could be re-paid on nearly every poll during a live turn (the #4842/#4808 high-CPU `get_cli_sessions` case). The streaming TTL is now held strictly above the sidebar poll interval (45s) and paired with the stable streaming cache key, so repeated polls reuse the projection; a new test asserts the TTL stays above the poll cadence so this can't silently regress. Thanks @starship-s. (#6102, #4842)
 
 - **Delegated subagent sessions in the sidebar now show a meaningful title instead of "Subagent Session".** Generic delegated child sessions previously all displayed the placeholder "Subagent Session" in the conversations list, making them indistinguishable. Their sidebar title is now derived (view-only) from the child's first user message during the existing batched sidebar-metadata pass — without mutating the stored session title, so the read-only boundary is preserved. Only generic "Subagent Session" placeholders are affected; custom titles are left untouched. Thanks @rodboev. (#6056, #6033)
