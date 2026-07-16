@@ -3714,6 +3714,35 @@ function syncModelChip(){
   if(mobileAction) mobileAction.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
 }
 
+// Remembers where #composerModelDropdown lives in the composer-footer so the
+// phone path can move it to <body> and put it back exactly. Captured lazily on
+// the first reparent (see _positionModelDropdown phone branch).
+let _modelDropdownHome=null;
+
+// Return the model dropdown into its original .composer-footer slot and clear
+// every inline style the phone path wrote, so the desktop CSS (position:absolute
+// anchored on the relatively-positioned .composer-footer) fully governs again.
+// Safe to call when the element never moved — it just no-ops the reinsert.
+function _restoreModelDropdownHome(){
+  const dd=document.getElementById('composerModelDropdown');
+  if(!dd) return;
+  dd.classList.remove('model-dropdown--floating');
+  dd.style.left='';
+  dd.style.top='';
+  dd.style.bottom='';
+  dd.style.width='';
+  dd.style.maxWidth='';
+  dd.style.maxHeight='';
+  if(_modelDropdownHome&&_modelDropdownHome.parent&&dd.parentNode!==_modelDropdownHome.parent){
+    const ref=_modelDropdownHome.nextSibling;
+    if(ref&&ref.parentNode===_modelDropdownHome.parent){
+      _modelDropdownHome.parent.insertBefore(dd,ref);
+    }else{
+      _modelDropdownHome.parent.appendChild(dd);
+    }
+  }
+}
+
 function _positionModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
@@ -3723,9 +3752,62 @@ function _positionModelDropdown(){
   const panel=$('composerMobileConfigPanel');
   const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:(chip&&chip.offsetParent?chip:mobileAction);
   if(!anchor) return;
-  const chipRect=anchor.getBoundingClientRect();
+  const isPhone=typeof window.matchMedia==='function'&&window.matchMedia('(max-width:640px)').matches;
+  if(isPhone){
+    // #6080: .composer-footer sets container-type:inline-size (and a
+    // backdrop-filter under the Geist Contrast skin) — both establish a fixed
+    // containing block, so a position:fixed dropdown left inside the footer
+    // resolves against the FOOTER (bottom of screen) instead of the viewport
+    // and lands below the fold. Reparent to <body> — exactly the working
+    // #profileDropdown idiom — so position:fixed is viewport-relative on ALL
+    // skins, then compute coordinates against the visual viewport.
+    if(!_modelDropdownHome){
+      _modelDropdownHome={parent:dd.parentNode,nextSibling:dd.nextSibling};
+    }
+    if(dd.parentNode!==document.body) document.body.appendChild(dd);
+    dd.classList.add('model-dropdown--floating');
+    const anchorRect=anchor.getBoundingClientRect();
+    const visualViewport=window.visualViewport;
+    const viewportWidth=Math.max(1,Number(visualViewport&&visualViewport.width)||window.innerWidth||1);
+    const viewportHeight=Math.max(1,Number(visualViewport&&visualViewport.height)||window.innerHeight||1);
+    const viewportTop=Math.max(0,Number(visualViewport&&visualViewport.offsetTop)||0);
+    const viewportBottom=viewportTop+viewportHeight;
+    const margin=8;
+    const gap=6;
+    const viewportLeft=Math.max(0,Number(visualViewport&&visualViewport.offsetLeft)||0);
+    const viewportRight=viewportLeft+viewportWidth;
+    const titlebar=document.querySelector('.app-titlebar');
+    const titlebarBottom=titlebar&&typeof titlebar.getBoundingClientRect==='function'
+      ? Number(titlebar.getBoundingClientRect().bottom)||0
+      : 0;
+    const contentTop=Math.max(viewportTop+margin,titlebarBottom+margin);
+    const menuWidth=Math.max(1,viewportWidth-margin*2);
+    const left=Math.max(viewportLeft+margin,Math.min(anchorRect.left,viewportRight-menuWidth-margin));
+    dd.style.left=`${left}px`;
+    dd.style.width=`${menuWidth}px`;
+    dd.style.maxWidth=`${menuWidth}px`;
+    dd.style.bottom='auto';
+    const menuHeight=Math.max(dd.scrollHeight,dd.offsetHeight);
+    const aboveSpace=Math.max(0,anchorRect.top-contentTop-gap-margin);
+    const belowSpace=Math.max(0,viewportBottom-anchorRect.bottom-gap-margin);
+    const openAbove=aboveSpace>=Math.min(menuHeight,belowSpace)||aboveSpace>=belowSpace;
+    const availableHeight=Math.max(1,openAbove?aboveSpace:belowSpace);
+    dd.style.maxHeight=`${availableHeight}px`;
+    const visibleHeight=Math.min(menuHeight||availableHeight,availableHeight);
+    const top=openAbove
+      ? anchorRect.top-gap-visibleHeight
+      : anchorRect.bottom+gap;
+    dd.style.top=`${Math.max(contentTop,Math.min(top,viewportBottom-margin-visibleHeight))}px`;
+    return;
+  }
+  // Desktop (>640px): keep the current master behaviour — an absolutely
+  // positioned .composer-footer child. Restore the element into the footer (in
+  // case a prior phone open moved it to <body>) and clear the phone inline
+  // styles so the desktop CSS anchor is byte-for-byte identical to master.
+  _restoreModelDropdownHome();
+  const anchorRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
-  let left=chipRect.left-footerRect.left;
+  let left=anchorRect.left-footerRect.left;
   const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
   left=Math.max(0, Math.min(left, maxLeft));
   dd.style.left=`${left}px`;
@@ -4532,6 +4614,10 @@ function closeModelDropdown(){
   if(dd) dd.classList.remove('open');
   if(chip) chip.classList.remove('active');
   if(mobileAction) mobileAction.classList.remove('active');
+  // If the phone path reparented the menu onto <body>, put it back in the
+  // footer and clear the fixed-position inline styles so the DOM returns to its
+  // baseline shape and the next desktop open anchors correctly (#6080).
+  if(typeof _restoreModelDropdownHome==='function') _restoreModelDropdownHome();
 }
 
 function closeSettingsModelDropdown(){
@@ -4652,6 +4738,26 @@ window.addEventListener('resize',()=>{
     _positionReasoningDropdown();
   }
 });
+
+// visualViewport resize/scroll fire on mobile when the on-screen keyboard opens
+// or the URL bar collapses/expands — the phone dropdown is fixed to the visual
+// viewport, so it must be re-measured against the new offsets. Coalesce with rAF
+// so a burst of scroll/resize events triggers at most one reposition per frame.
+let _modelDropdownRepositionScheduled=false;
+function _repositionOpenModelDropdown(){
+  const dd=$('composerModelDropdown');
+  if(!(dd&&dd.classList.contains('open'))||_modelDropdownRepositionScheduled) return;
+  _modelDropdownRepositionScheduled=true;
+  requestAnimationFrame(()=>{
+    _modelDropdownRepositionScheduled=false;
+    const openDd=$('composerModelDropdown');
+    if(openDd&&openDd.classList.contains('open')) _positionModelDropdown();
+  });
+}
+if(window.visualViewport){
+  window.visualViewport.addEventListener('resize',_repositionOpenModelDropdown);
+  window.visualViewport.addEventListener('scroll',_repositionOpenModelDropdown);
+}
 
 // ── Fit-based composer footer collapse ──────────────────────────────────────
 // Stage classes on .composer-footer:
