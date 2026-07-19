@@ -56,6 +56,9 @@ function getModelLabel(modelId) {{
 }}
 eval(extractFunc('_compactComposerModelChipLabel'));
 eval(extractFunc('_usedModelTurnChipLabel'));
+eval(extractFunc('_gatewayProviderName'));
+eval(extractFunc('_gatewayRoutingLabel'));
+eval(extractFunc('_formatGatewayModelLabel'));
 const modelId = 'gpt-5-mini';
 const expectedPresent = _compactComposerModelChipLabel(modelId, getModelLabel(modelId));
 const cases = {{
@@ -65,8 +68,13 @@ const cases = {{
     _usedModel: modelId,
     _gatewayRouting: {{ used_model: 'deepseek-v3.2' }},
   }}),
+  suppressedRoutingOnly: _usedModelTurnChipLabel({{
+    _usedModel: modelId,
+    _gatewayRouting: {{ used_provider: 'openrouter' }},
+  }}),
   absent: _usedModelTurnChipLabel({{}}),
   nullMsg: _usedModelTurnChipLabel(null),
+  gatewayFallback: _formatGatewayModelLabel(modelId, getModelLabel(modelId), {{ used_provider: 'openrouter' }}),
 }};
 console.log(JSON.stringify(cases));
 """
@@ -75,7 +83,10 @@ console.log(JSON.stringify(cases));
 
 def test_streaming_stamps_used_model_on_assistant_message_and_usage_payload():
     assert "_dm['_usedModel'] = _used_model" in STREAMING_PY
-    assert "_used_model = resolved_model or model" in STREAMING_PY
+    # The served model must be read from the agent AFTER the run — the agent
+    # mutates agent.model when a fallback fires, so the pre-run resolved_model
+    # would mis-attribute fallback turns.
+    assert "_used_model = getattr(agent, 'model', None) or resolved_model or model" in STREAMING_PY
     assert "usage['used_model'] = _used_model" in STREAMING_PY
 
 
@@ -106,14 +117,36 @@ def test_used_model_turn_chip_label_renders_and_suppresses_gateway_duplicate():
     assert cases["present"] == cases["expectedPresent"]
     assert cases["present"]  # non-empty label when _usedModel is set
     assert cases["suppressed"] == ""
+    # Routing metadata WITHOUT used_model must also suppress the additive chip:
+    # the gateway formatter owns the label (falling back to _usedModel), so a
+    # provider-only routing payload must not render two model labels.
+    assert cases["suppressedRoutingOnly"] == ""
     assert cases["absent"] == ""
     assert cases["nullMsg"] == ""
+    # When routing omits used_model, the gateway label falls back to the
+    # caller-provided model id (the settled footer passes msg._usedModel).
+    assert cases["gatewayFallback"].startswith(cases["expectedPresent"])
+    assert "via" in cases["gatewayFallback"]
 
 
 def test_settled_footer_wires_used_model_chip_in_dom_paths():
     assert "msg-used-model-inline" in UI_JS
     assert "_usedModelTurnChipLabel(msg)" in UI_JS
+    # The settled footer must hand the served model to the gateway formatter as
+    # its fallback, and skip the generic chip when the transparent turn footer
+    # owns the model label (one model label per turn).
+    assert "_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing)" in UI_JS
+    assert "_transparentFooterOwnsModel" in UI_JS
     assert ".msg-used-model-inline" in STYLE_CSS
+
+
+def test_settled_footer_orders_model_chip_after_duration():
+    # Match the transparent footer order (elapsed · model · …): the duration
+    # fragment must be pushed before the used-model fragment.
+    footer_block = UI_JS.split("const usedModelText=_usedModelTurnChipLabel(msg);", 1)[1]
+    duration_at = footer_block.index("duration.className='msg-duration-inline'")
+    used_model_at = footer_block.index("usedModel.className='msg-used-model-inline'")
+    assert duration_at < used_model_at
 
 
 def test_transparent_turn_footer_includes_model_between_duration_and_ttft():

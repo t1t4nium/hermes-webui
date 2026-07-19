@@ -7032,8 +7032,11 @@ function _formatGatewayModelLabel(modelId,labelText,routing){
 }
 function _usedModelTurnChipLabel(msg){
   if(!msg)return'';
-  const routing=msg._gatewayRouting||null;
-  if(routing&&String(routing.used_model||'').trim())return'';
+  // Gateway turns own their model label via _formatGatewayModelLabel (which
+  // falls back to msg._usedModel when routing omits used_model), so suppress
+  // the additive chip whenever routing metadata is present — not only when
+  // routing.used_model is set — to guarantee one model label per turn.
+  if(msg._gatewayRouting)return'';
   const usedModel=String(msg._usedModel||'').trim();
   if(!usedModel)return'';
   return _compactComposerModelChipLabel(usedModel,getModelLabel(usedModel));
@@ -16596,7 +16599,7 @@ function renderMessages(options){
       const msg=S.messages[mi]||{};
       if(msg.role!=='assistant') continue;
       const routing=msg._gatewayRouting||null;
-      const gatewayText=_formatGatewayModelLabel(S.session&&S.session.model||'', '', routing);
+      const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
       const failoverText=_gatewayRoutingFailoverText(routing);
       const modelWarningText=_gatewayModelWarningText(routing);
       const hasTurnUsage=!!msg._turnUsage;
@@ -16631,17 +16634,25 @@ function renderMessages(options){
         gateway.textContent=gatewayText;
         fragments.push(gateway);
       }
-      if(usedModelText){
-        const usedModel=document.createElement('span');
-        usedModel.className='msg-used-model-inline';
-        usedModel.textContent=usedModelText;
-        fragments.push(usedModel);
-      }
       if(durationText){
         const duration=document.createElement('span');
         duration.className='msg-duration-inline';
         duration.textContent=`Done in ${durationText}`;
         fragments.push(duration);
+      }
+      // The transparent turn footer owns the model label (.lf-model) whenever
+      // the turn has transparent event rows — skip the generic chip there so
+      // exactly one model label renders per turn. Model sits after duration to
+      // match the transparent footer order (elapsed · model · …).
+      const _transparentFooterOwnsModel=usedModelText&&isTransparentStream()&&row&&(()=>{
+        const blocks=_assistantTurnBlocks(row);
+        return !!(blocks&&blocks.querySelector(':scope > .transparent-event-row'));
+      })();
+      if(usedModelText&&!_transparentFooterOwnsModel){
+        const usedModel=document.createElement('span');
+        usedModel.className='msg-used-model-inline';
+        usedModel.textContent=usedModelText;
+        fragments.push(usedModel);
       }
       if(window._showTokenUsage&&hasTurnUsage){
         const usage=document.createElement('span');
