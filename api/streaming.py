@@ -6508,7 +6508,7 @@ def _terminal_turn_duration(session, *, now: float | None = None) -> float | Non
     try:
         started = float(started_at)
         ended = float(time.time() if now is None else now)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if not math.isfinite(started) or not math.isfinite(ended) or started <= 0:
         return None
